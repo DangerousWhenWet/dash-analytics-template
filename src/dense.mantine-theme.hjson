@@ -1,0 +1,278 @@
+{
+  // special thanks to Claude Sonnet 4 for writing this because I really really hate CSS
+
+  colorScheme: light
+  
+  spacing: {
+    xs: 2px
+    sm: 4px
+    md: 6px
+    lg: 8px
+    xl: 12px
+  }
+  
+  fontSizes: {
+    xs: 10px
+    sm: 11px
+    md: 12px
+    lg: 14px
+    xl: 16px
+  }
+  
+  lineHeight: 1.2
+  
+  headings: {
+    fontWeight: 600
+    sizes: {
+      h1: { 
+        fontSize: 16px
+        lineHeight: 1.2 
+      }
+      h2: { 
+        fontSize: 14px
+        lineHeight: 1.2 
+      }
+      h3: { 
+        fontSize: 13px
+        lineHeight: 1.2 
+      }
+      h4: { 
+        fontSize: 12px
+        lineHeight: 1.2 
+      }
+      h5: { 
+        fontSize: 11px
+        lineHeight: 1.2 
+      }
+      h6: { 
+        fontSize: 10px
+        lineHeight: 1.2 
+      }
+    }
+  }
+
+  // Reduced component-specific spacing
+  components: {
+    Button: {
+      styles: {
+        root: {
+          padding: 4px 8px
+          height: 24px
+          minHeight: 24px
+          fontSize: 11px
+        }
+      }
+    }
+    
+    TextInput: {
+      styles: {
+        input: {
+          padding: 2px 6px
+          height: 24px
+          minHeight: 24px
+          fontSize: 11px
+        }
+        label: {
+          marginBottom: 2px
+          fontSize: 10px
+          fontWeight: 500
+        }
+      }
+    }
+    
+    Select: {
+      styles: {
+        input: {
+          padding: 2px 6px
+          height: 24px
+          minHeight: 24px
+          fontSize: 11px
+        }
+        label: {
+          marginBottom: 2px
+          fontSize: 10px
+        }
+      }
+    }
+    
+    NumberInput: {
+      styles: {
+        input: {
+          padding: 2px 6px
+          height: 24px
+          minHeight: 24px
+          fontSize: 11px
+        }
+        label: {
+          marginBottom: 2px
+          fontSize: 10px
+        }
+      }
+    }
+    
+    Switch: {
+      styles: {
+        root: {
+          marginBottom: 4px
+        }
+        label: {
+          fontSize: 11px
+          paddingLeft: 6px
+        }
+        track: {
+          width: 32px
+          height: 16px
+        }
+        thumb: {
+          width: 12px
+          height: 12px
+        }
+      }
+    }
+    
+    Checkbox: {
+      styles: {
+        root: {
+          marginBottom: 2px
+        }
+        label: {
+          fontSize: 11px
+          paddingLeft: 6px
+        }
+        input: {
+          width: 14px
+          height: 14px
+        }
+      }
+    }
+    
+    Card: {
+      styles: {
+        root: {
+          padding: 8px
+          margin: 2px
+        }
+      }
+    }
+    
+    Paper: {
+      styles: {
+        root: {
+          padding: 6px
+        }
+      }
+    }
+    
+    Alert: {
+      styles: {
+        root: {
+          padding: 6px 8px
+        }
+        title: {
+          fontSize: 12px
+          marginBottom: 2px
+        }
+        message: {
+          fontSize: 11px
+        }
+      }
+    }
+    
+    Table: {
+      styles: {
+        root: {
+          fontSize: 10px
+        }
+        thead: {
+          tr: {
+            th: {
+              padding: 2px 4px
+              fontSize: 10px
+              fontWeight: 600
+            }
+          }
+        }
+        tbody: {
+          tr: {
+            td: {
+              padding: 1px 4px
+              fontSize: 10px
+            }
+          }
+        }
+      }
+    }
+    
+    Group: {
+      styles: {
+        root: {
+          gap: 4px
+        }
+      }
+    }
+    
+    Stack: {
+      styles: {
+        root: {
+          gap: 4px
+        }
+      }
+    }
+    
+    Grid: {
+      styles: {
+        root: {
+          margin: 0
+          gap: 4px
+        }
+        col: {
+          padding: 2px
+        }
+      }
+    }
+
+    Title: {
+        styles: {
+            root: {
+            // Override the default title sizes to be much more reasonable
+            "&[data-order='1']": {  // h1
+                fontSize: 16px
+                fontWeight: 600
+                lineHeight: 1.2
+                marginBottom: 4px
+            }
+            "&[data-order='2']": {  // h2  
+                fontSize: 14px
+                fontWeight: 600
+                lineHeight: 1.2
+                marginBottom: 3px
+            }
+            "&[data-order='3']": {  // h3
+                fontSize: 13px
+                fontWeight: 500
+                lineHeight: 1.2
+                marginBottom: 2px
+            }
+            "&[data-order='4']": {  // h4
+                fontSize: 12px
+                fontWeight: 500
+                lineHeight: 1.2
+                marginBottom: 2px
+            }
+            "&[data-order='5']": {  // h5
+                fontSize: 11px
+                fontWeight: 500
+                lineHeight: 1.2
+                marginBottom: 1px
+            }
+            "&[data-order='6']": {  // h6
+                fontSize: 10px
+                fontWeight: 500
+                lineHeight: 1.2
+                marginBottom: 1px
+            }
+            }
+        }
+    }
+  }
+}
