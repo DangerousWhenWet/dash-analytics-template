@@ -45,6 +45,7 @@ app.layout = dmc.MantineProvider(
         },
 
         children=[
+            dcc.Location(id='url', refresh='callback-nav'),
 
             #top titlebar
             dmc.AppShellHeader(

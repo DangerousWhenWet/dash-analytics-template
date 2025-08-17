@@ -13,7 +13,7 @@ dash.register_page(
     __name__,
     path='/background-demo',
     description='A demo of how to use celery to process long-running tasks in the background.',
-    tags=['meta', 'developer', 'demo']
+    tags=['meta', 'developer', 'demo', 'suppressed']
 )
 
 layout = [

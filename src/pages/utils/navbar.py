@@ -145,7 +145,7 @@ def initialize():
         ).layout(cast(
             List[Component],
             interleave_with_dividers(
-                [NavbarLink.from_page(epr.get_entry(epr.epr.index == idx)).layout   for idx in epr.with_tags(['meta']).index]
+                [NavbarLink.from_page(epr.get_entry(epr.epr.index == idx)).layout   for idx in epr.with_tags(tags=['meta'], blacklist=['suppressed']).index]
             )
         )),
     )

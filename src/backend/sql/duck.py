@@ -1,6 +1,8 @@
 #pylint: disable=missing-docstring,line-too-long,trailing-whitespace
-from typing import Optional, Any, List, Set
+from contextlib import contextmanager
 import re
+from typing import Optional, Any, List, Set
+import warnings
 
 
 import duckdb
@@ -8,6 +10,13 @@ import pandas as pd
 import sqlparse
 
 from .base import DUCKDB
+
+
+@contextmanager
+def ignore_warnings():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        yield
 
 
 class DuckDBMonitorMiddleware:
@@ -126,6 +135,6 @@ class DuckDBMonitorMiddleware:
 
     @staticmethod
     def get_dataframe(sql: str, *args, **kwargs):
-        with duckdb.connect(DUCKDB.PATH, *args, **kwargs) as conn:
+        with ignore_warnings(), duckdb.connect(DUCKDB.PATH, *args, **kwargs) as conn:
             DuckDBMonitorMiddleware.log_query(sql, conn)
             return pd.read_sql(sql, conn)
