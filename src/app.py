@@ -2,7 +2,7 @@
 from typing import cast
 
 import dash
-from dash import Input, Output
+from dash import Input, Output, dcc, html
 from dash_iconify import DashIconify
 import dash_mantine_components as dmc
 import hjson
@@ -31,7 +31,7 @@ app.layout = dmc.MantineProvider(
             "breakpoint": "sm",
             "collapsed": {
                 "mobile": True,
-                "desktop": False  # Add this - controls desktop collapse state
+                "desktop": False
             },
         },
 
@@ -86,7 +86,7 @@ app.layout = dmc.MantineProvider(
 
             nbar.get_navbar(), #type:ignore
 
-            dmc.AppShellMain(dash.page_container),
+            dmc.AppShellMain(dash.page_container)
         ]
     )
 )

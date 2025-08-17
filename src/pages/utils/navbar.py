@@ -17,9 +17,9 @@ from pages.utils import extended_page_registry as epr
 def is_none_or_nan(x:Optional[Any]) -> bool:
     return x is None or pd.isna(x)
 
-def interleave_with_dividers(items:Iterable[Component], divider:dmc.Divider = dmc.Divider(size="xs", color="gray", my="xs")) -> List[Component]:
+def interleave_with_dividers(items:Iterable[Component], divider:dmc.Divider = dmc.Divider(size="xs", color="lightgrey", my="xs")) -> List[Component]: #type:ignore
     #interleave dividers between items e.g. [item1, divider, item2, divider, item3, ...]
-    return list(itertools.chain.from_iterable(itertools.zip_longest(items, [divider])))
+    return list(itertools.chain.from_iterable(zip(items, itertools.repeat(divider))))[:-1]
 
 
 

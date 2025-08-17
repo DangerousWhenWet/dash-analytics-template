@@ -42,6 +42,23 @@ class PageRegistryEntry(TypedDict):
     icon: Optional[str]
 
 
+class PageRegistryInput(TypedDict):
+    module: str
+    path: Optional[str]
+    path_template: Optional[str]
+    name: Optional[str]
+    order: Optional[float]
+    title: Optional[str]
+    description: Optional[str]
+    image: Optional[str]
+    image_url: Optional[str]
+    redirect_from: Optional[str]
+    layout: Optional[str]
+    tags: Optional[List[str]]
+    icon: Optional[str]
+    
+
+
 def get_entry(*boolean_masks:pd.Series, logic:Literal['any', 'all']='all') -> PageRegistryEntry:
     mask = functools.reduce(lambda l,r: (l | r) if logic == 'any' else (l & r), boolean_masks)
     entry = epr.loc[mask].iloc[0].to_dict()
