@@ -35,6 +35,15 @@ app.layout = dmc.MantineProvider(
             },
         },
 
+        aside={
+            "width": 300,
+            "breakpoint": "sm",
+            "collapsed": {
+                "desktop": True,
+                "mobile": True
+            },
+        },
+
         children=[
 
             #top titlebar
@@ -86,7 +95,9 @@ app.layout = dmc.MantineProvider(
 
             nbar.get_navbar(), #type:ignore
 
-            dmc.AppShellMain(dash.page_container)
+            dmc.AppShellMain(dash.page_container),
+
+            dmc.AppShellAside(dmc.Text("EMPTY!!!"), id="appshell-aside"),
         ]
     )
 )

@@ -41,8 +41,6 @@ class DUCKDB: #pylint: disable=too-few-public-methods
                 );
             """)
 
-DUCKDB.init()
-
 
 class POSTGRES: #pylint: disable=too-few-public-methods
     """

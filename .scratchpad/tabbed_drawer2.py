@@ -59,8 +59,6 @@ app.layout = dmc.MantineProvider(
 
                             dmc.Tabs(
                                 children=[dmc.TabsList([
-
-
                                     dmc.TabsTab(
                                         dmc.Group(
                                                 children = [
@@ -71,7 +69,7 @@ app.layout = dmc.MantineProvider(
                                                 ),
                                                 dmc.Text("Plots")
                                             ],
-                                            style={"writingMode": "vertical-rl", "textOrientation": "mixed"},
+                                            style={"writingMode": "vertical-rl", "textOrientation": "mixed", 'min-width': '30px'},
                                         ),
                                         px=2,
                                         value="tab-plots",
@@ -88,7 +86,7 @@ app.layout = dmc.MantineProvider(
                                                 ),
                                                 dmc.Text("Filters")
                                             ],
-                                            style={"writingMode": "vertical-rl", "textOrientation": "mixed"},
+                                            style={"writingMode": "vertical-rl", "textOrientation": "mixed", 'min-width': '30px'},
                                         ),
                                         px=2,
                                         value="tab-filters",
@@ -99,6 +97,7 @@ app.layout = dmc.MantineProvider(
                                 variant='outline',
                                 orientation='vertical',
                                 placement='left',
+                                mr="calc(-1 * var(--app-shell-padding) - 1px)",
                             ),
                         ],
                         h='100%', w='100%',
