@@ -3,7 +3,7 @@ import datetime as dt
 from typing import cast, Optional, List, Dict, Tuple, Literal, Any, Callable
 
 import dash
-from dash import dcc, Input, Output, State
+from dash import dcc, html, Input, Output, State
 from dash_iconify import DashIconify
 import dash_mantine_components as dmc
 import pandas as pd
@@ -49,6 +49,7 @@ def make_tab_close_button(tab_id:Dict[str, Any]):
         ),
         id=tab_id,
         variant='transparent',
+        hiddenFrom="sm",
         style={
             "position": "absolute",
             "top": "0px",
@@ -86,8 +87,17 @@ class Distro:
             dcc.Store(id=self._p('app-state')),
 
             dmc.Group(
+                wrap='nowrap',
                 children = [
-                    dmc.Center(dmc.Text("Main page stuff goes here!"),),
+                    #dcc.Graph(id=self._p('graph')),
+                    dmc.Box(
+                        dcc.Graph(
+                            id=self._p('graph'),
+                            style={"width": "100%", "height": "100%"}
+                        ),
+                        style={"flex": "1", "minWidth": "0"},
+                        h="100%"
+                    ),
 
                     dmc.Tabs(
                         id=self._p("tabs"),
@@ -170,18 +180,39 @@ class Distro:
             id=dict(type=self._p('tab-content'), index=self._tab_values.index('tab-plots')),
             children=[
                 make_tab_close_button(dict(type=self._p('close-tab'), index='tab-plots')),
-                dmc.Stack([
+
+                dmc.ScrollArea([
+                    dmc.Center(dmc.SegmentedControl(
+                        id=self._p('dimensionality'),
+                        value='2D',
+                        data=[
+                            {
+                                "value": '2D',
+                                "label": dmc.Center(
+                                    [DashIconify(icon='gis:coord-system', width=16), html.Span('2D')],
+                                    style={"gap": 10},
+                                ),
+                            },
+                            {
+                                "value": '3D',
+                                "label": dmc.Center(
+                                    [DashIconify(icon='gis:coord-system-3d', width=16), html.Span('3D')],
+                                    style={"gap": 10},
+                                ),
+                            }
+                        ],#type: ignore
+                    )),
                     dmc.Select(
-                        #label='X:',
-                        leftSection=DashIconify(icon='emojione-monotone:letter-x'),
+                        leftSection=DashIconify(icon='emojione-monotone:letter-x', width=20,height=20),
+                        leftSectionPointerEvents='none',
                         id=self._p('x-column-select'),
                         data=col_keys,
                         value=col_keys[0] if len(col_keys) > 1 else None,
                         clearable=False,
                     ),
                     dmc.Select(
-                        #label='Y:',
-                        leftSection=DashIconify(icon='emojione-monotone:letter-y'),
+                        leftSection=DashIconify(icon='emojione-monotone:letter-y', width=20,height=20),
+                        leftSectionPointerEvents='none',
                         id=self._p('y-column-select'),
                         data=col_keys,
                         value=col_keys[1] if len(col_keys) > 1 else None,
@@ -251,13 +282,13 @@ class Distro:
     #           modifies collapsed-state of the tab aside as well as visibility of the various tab contents in it (via style {'display': 'none'})
     def _manage_tab_aside_content(self, active_tab, aside, tab_content_styles):
         #NOTE: tab_content_styles is indexed-alike to self._tab_values due to how we initialized the tab-content dmc.Box's id's in the layout
-        print(f"_manage_tab_aside_content({active_tab=}, {aside=}, {tab_content_styles=})")
+        #print(f"_manage_tab_aside_content({active_tab=}, {aside=}, {tab_content_styles=})")
         if tab_content_styles:
             for idx, tab_value in enumerate(self._tab_values):
                 tab_content_styles[idx] = set_visibility(tab_content_styles[idx] or {}, active_tab == tab_value)
             aside_hidden = active_tab not in self._tab_values
             aside["collapsed"] = {"mobile": aside_hidden, "desktop": aside_hidden}
-            print(f"_manage_tab_aside_content() -> {aside=}, {tab_content_styles=}")
+            #print(f"_manage_tab_aside_content() -> {aside=}, {tab_content_styles=}")
             return aside, tab_content_styles
         else:
             return dash.no_update, [dash.no_update]*len(tab_content_styles or [])
