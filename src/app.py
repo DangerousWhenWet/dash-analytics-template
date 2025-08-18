@@ -2,22 +2,40 @@
 from typing import cast
 
 import dash
-from dash import Input, Output, dcc, html
+from dash import Input, Output, State, dcc, html
 from dash_iconify import DashIconify
 import dash_mantine_components as dmc
 import hjson
+import plotly.io as pio
 
+from backend.sql.base import DUCKDB
 from pages.utils import navbar as nbar, extended_page_registry as epr
 
 
 with open('dense.mantine-theme.hjson', 'r', encoding='utf8') as f:
     theme = hjson.load(f)
+DUCKDB.init()
 
+# set up chart theming
+dmc.add_figure_templates()
+
+mantine_light_with_grid = pio.templates['mantine_light'].to_plotly_json()
+mantine_light_with_grid['layout']['xaxis'].update(showgrid=True)
+mantine_light_with_grid['layout']['yaxis'].update(showgrid=True)
+pio.templates['mantine_light_with_grid'] = mantine_light_with_grid
+pio.templates.default = 'mantine_light_with_grid'
+
+mantine_dark_with_grid = pio.templates['mantine_dark'].to_plotly_json()
+mantine_dark_with_grid['layout']['xaxis'].update(showgrid=True)
+mantine_dark_with_grid['layout']['yaxis'].update(showgrid=True)
+pio.templates['mantine_dark_with_grid'] = mantine_dark_with_grid
+pio.templates.default = 'mantine_dark_with_grid'
 
 # NOTE: you cannot import this module from any other module. if ever you need `app`, use `dash.app` to get a reference to it.
-app = dash.Dash(__name__, use_pages=True)
+app = dash.Dash(__name__, use_pages=True, suppress_callback_exceptions=True)
 reg = epr.compile_registry()
 nbar.initialize()
+
 
 app.layout = dmc.MantineProvider(
     theme=cast(dmc.MantineProvider.Theme, theme),
@@ -55,17 +73,21 @@ app.layout = dmc.MantineProvider(
                         children=[
                             dmc.Group(
                                 children=[
-                                    dmc.Burger(
-                                        id="mobile-burger",
-                                        size="sm",
-                                        hiddenFrom="sm",
-                                        opened=False,
+
+                                    dmc.ActionIcon(
+                                        nbar.BURGER_CLOSED,
+                                        id='mobile-burger',
+                                        variant='transparent',
+                                        size=30,
+                                        hiddenFrom="sm"
                                     ),
-                                    dmc.Burger(
-                                        id="desktop-burger",
-                                        size="sm",
-                                        visibleFrom="sm",
-                                        opened=True,
+
+                                    dmc.ActionIcon(
+                                        nbar.BURGER_OPEN,
+                                        id='desktop-burger',
+                                        variant='transparent',
+                                        size=30,
+                                        visibleFrom="sm"
                                     ),
 
                                     DashIconify(
@@ -96,7 +118,7 @@ app.layout = dmc.MantineProvider(
 
             nbar.get_navbar(), #type:ignore
 
-            dmc.AppShellMain(dash.page_container,),
+            dmc.AppShellMain(dash.page_container),
 
             dmc.AppShellAside(dmc.Text("EMPTY!!!"), id="appshell-aside"),
         ]

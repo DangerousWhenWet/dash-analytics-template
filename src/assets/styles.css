@@ -2,19 +2,6 @@
     background-color: transparent !important;
 }
 
-div:has(> #_pages_content) {
-    display: flex !important;
-    flex-direction: column !important;
-    height: 100% !important;
-}
-
 #_pages_content {
-    height: 100% !important;
-    flex: 1 !important;
-}
-
-#_pages_dummy {
-    height: 0 !important;
-    flex: 0 !important;
-    display: none !important;
+    height: calc(100vh - var(--app-shell-header-offset) - 2*var(--app-shell-padding));
 }

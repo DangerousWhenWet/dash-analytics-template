@@ -19,6 +19,7 @@ class DUCKDB: #pylint: disable=too-few-public-methods
     @staticmethod
     def init():
         DUCKDB.PATH.parent.mkdir(parents=True, exist_ok=True)
+        #print("Created database at:", DUCKDB.PATH)
         with duckdb.connect(DUCKDB.PATH) as conn:
             # create administrative tables
 

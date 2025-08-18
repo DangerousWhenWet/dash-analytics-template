@@ -7,6 +7,9 @@ from dash import dcc, html, Input, Output, State
 from dash_iconify import DashIconify
 import dash_mantine_components as dmc
 import pandas as pd
+from plotly.colors import qualitative as qualitative_color_scales
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from pydantic import BaseModel
 
 from backend.jobqueue import tasks
@@ -23,6 +26,10 @@ class DatasourceSchema(BaseModel):
     columns: List[Column]
     name: str
 
+    @property
+    def has_data(self) -> bool:
+        return bool(self.columns)
+
     @staticmethod
     def from_df(data_name:str, data_df:pd.DataFrame) -> 'DatasourceSchema':
         columns = [
@@ -35,9 +42,6 @@ class PlotSettings(BaseModel):
     x_column: Optional[str] = None
     y_column: Optional[str] = None
 
-class AppState(BaseModel):
-    plot_settings: PlotSettings = PlotSettings()
-    has_data: bool = False
 
 
 def make_tab_close_button(tab_id:Dict[str, Any]):
@@ -67,6 +71,13 @@ def set_visibility(style_dict:Dict[str, Any], visible:bool):
     return style_dict
 
 
+def error_figure(use_dark_mode:bool, err_text:str) -> go.Figure:
+    err_fig = go.Figure(layout_margin=dict(l=0, r=0, t=0, b=0))
+    err_fig.add_annotation(x=0.5, xref='paper', y=0.5, yref='paper', text=err_text, showarrow=False)
+    err_fig.update_layout(template=f"mantine_{'dark' if use_dark_mode else 'light'}_with_grid")
+    return err_fig
+
+
 class Distro:
     def __init__(   self,
                     id_prefix:str,
@@ -84,7 +95,8 @@ class Distro:
     def layout(self):
         return [
             dcc.Store(id=self._p('datasource-schema')),
-            dcc.Store(id=self._p('app-state')),
+            dcc.Store(id=self._p('plot-settings')),
+
 
             dmc.Group(
                 wrap='nowrap',
@@ -104,63 +116,65 @@ class Distro:
                         allowTabDeactivation=True,
                         color="dark",
                         autoContrast=True,
+                        h='100%',
 
-                        children=[dmc.TabsList([
-                            dmc.TabsTab(
-                                dmc.Group(
+                        children=[dmc.TabsList(
+                            justify='flex-start',
+                            children = [
+                                dmc.TabsTab(
+                                    dmc.Group(
+                                            children = [
+                                            DashIconify(
+                                                icon='bitcoin-icons:gear-outline',
+                                                width=20,
+                                                height=20,
+                                            ),
+                                            dmc.Text("Plot Settings", fw=500) #type: ignore
+                                        ],
+                                        style={"writingMode": "vertical-rl", "textOrientation": "mixed", 'min-width': '30px'},
+                                    ),
+                                    px=2,
+                                    bd="1px solid var(--mantine-color-default-border)",
+                                    value="tab-plots",
+                                ),
+
+
+                                dmc.TabsTab(
+                                    dmc.Group(
                                         children = [
-                                        DashIconify(
-                                            icon='bitcoin-icons:gear-outline',
-                                            width=20,
-                                            height=20,
-                                        ),
-                                        dmc.Text("Plot Settings", fw=500) #type: ignore
-                                    ],
-                                    style={"writingMode": "vertical-rl", "textOrientation": "mixed", 'min-width': '30px'},
+                                            DashIconify(
+                                                icon='stash:filter-light',
+                                                width=20,
+                                                height=20,
+                                            ),
+                                            dmc.Text("Filters", fw=500) #type: ignore
+                                        ],
+                                        style={"writingMode": "vertical-rl", "textOrientation": "mixed", 'min-width': '30px'},
+                                    ),
+                                    px=2,
+                                    bd="1px solid var(--mantine-color-default-border)",
+                                    value="tab-filters",
                                 ),
-                                px=2,
-                                bd="1px solid var(--mantine-color-default-border)",
-                                value="tab-plots",
-                            ),
 
 
-                            dmc.TabsTab(
-                                dmc.Group(
-                                    children = [
-                                        DashIconify(
-                                            icon='stash:filter-light',
-                                            width=20,
-                                            height=20,
-                                        ),
-                                        dmc.Text("Filters", fw=500) #type: ignore
-                                    ],
-                                    style={"writingMode": "vertical-rl", "textOrientation": "mixed", 'min-width': '30px'},
-                                ),
-                                px=2,
-                                bd="1px solid var(--mantine-color-default-border)",
-                                value="tab-filters",
-                            ),
-
-
-                            dmc.TabsTab(
-                                dmc.Group(
-                                        children = [
-                                        DashIconify(
-                                            icon='fluent:arrow-trending-lines-20-regular',
-                                            width=20,
-                                            height=20,
-                                        ),
-                                        dmc.Text("Overlays", fw=500) #type: ignore
-                                    ],
-                                    style={"writingMode": "vertical-rl", "textOrientation": "mixed", 'min-width': '30px'},
-                                ),
-                                px=2,
-                                bd="1px solid var(--mantine-color-default-border)",
-                                value="tab-overlays",
-                            )
-
-
-                        ])],
+                                dmc.TabsTab(
+                                    dmc.Group(
+                                            children = [
+                                            DashIconify(
+                                                icon='fluent:arrow-trending-lines-20-regular',
+                                                width=20,
+                                                height=20,
+                                            ),
+                                            dmc.Text("Overlays", fw=500) #type: ignore
+                                        ],
+                                        style={"writingMode": "vertical-rl", "textOrientation": "mixed", 'min-width': '30px'},
+                                    ),
+                                    px=2,
+                                    bd="1px solid var(--mantine-color-default-border)",
+                                    value="tab-overlays",
+                                )
+                            ]
+                        )],
                         variant='pills',
                         orientation='vertical',
                         placement='left',
@@ -245,23 +259,20 @@ class Distro:
 
 
     # CALLBACK, triggered by page load or by modification of the DatasourceSchema
-    #           sets the DatasourceSchema and AppState stores
+    #           sets initial contents of all dcc.Store's
     def _initialize(self, _):
         if self._datasource_getter: # developer already declared which datasource to use
             data_name, data_df = self._datasource_getter()
             schema = DatasourceSchema.from_df(data_name, data_df)
-            state = AppState(
-                plot_settings=PlotSettings(
-                    x_column=schema.columns[0].key,
-                    y_column=schema.columns[1].key if len(schema.columns) > 1 else schema.columns[0].key
-                ),
-                has_data=True
+            plot_settings = PlotSettings(
+                x_column=schema.columns[0].key,
+                y_column=schema.columns[1].key if len(schema.columns) > 1 else schema.columns[0].key
             )
         else:
             schema = DatasourceSchema(columns=[], name="No data")
-            state = AppState(has_data=False)
+            plot_settings = PlotSettings()
         #print(f"_initialize({schema=}, {state=})")
-        return schema.model_dump(), state.model_dump()
+        return schema.model_dump(), plot_settings.model_dump()
 
 
 
@@ -298,23 +309,88 @@ class Distro:
     #           deactivates the tab
     def _deactivate_tabs(self, any_actionicon_nclicks):
         return None if any(any_actionicon_nclicks) else dash.no_update
+    
+
+    #CALLBACK, triggered by interaction with anything in the Plot Settings tab
+    #          mutates the plot-settings Store
+    def _plot_settings_changed(self, columns, plot_settings):
+        plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
+        plot_settings.x_column = columns['x']
+        plot_settings.y_column = columns['y']
+        return plot_settings.model_dump()
+
+    #CALLBACK, interaction with any of PlotSettings, ..., or the theme switcher
+    #          updates the graph
+    def _update_graph(self, use_dark_mode, plot_settings):
+        try:
+            plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
+            data_name, df = self._datasource_getter() #type:ignore
+            fig = make_subplots(
+                rows=2, row_heights=[0.1, 0.9],
+                cols=2, column_widths=[0.9, 0.1],
+                shared_yaxes=True, shared_xaxes=True,
+                vertical_spacing=0.02, horizontal_spacing=0.01
+            )
+            ser_x = df[plot_settings.x_column]
+            ser_y = df[plot_settings.y_column]
+            fig.add_trace(go.Scatter(x=ser_x, y=ser_y, mode='markers'), row=2, col=1)
+            fig.add_trace(
+                go.Histogram(
+                    x=ser_x, nbinsx=50, marker=dict(opacity=0.5), bingroup=1,
+                    showlegend=False, name=plot_settings.x_column
+                ),
+                row=1, col=1
+            )
+            fig.add_trace(
+                go.Histogram(
+                    y=ser_y, nbinsy=50, marker=dict(opacity=0.5), bingroup=2,
+                    showlegend=False, name=plot_settings.y_column
+                ),
+                row=2, col=2
+            )
+        # fig.update_layout(
+        #     title=f"<b>{page.title}:</b> {page.plottables[range].name} vs. {page.plottables[domain].name}",
+        #     margin=dict(l=0, r=0, t=40, b=10),
+        #     barmode='overlay',
+        #     showlegend=show_legend,
+        #     legend=(legend_config|{'bgcolor':hex_to_rgba('FFFFFF', 0.500), 'orientation':legend_orientation}),
+        #     boxgap=0.1,
+        #     uirevision=True, # prevent automatic resize
+        # )
+            fig.update_layout(
+                title=f"<b>{data_name}:</b> {plot_settings.y_column} vs. {plot_settings.x_column}",
+                margin=dict(l=0, r=0, t=40, b=10),
+                barmode='overlay',
+                showlegend=True,
+                legend=dict(orientation='h'),
+                boxgap=0.1,
+                uirevision=True, # prevent automatic resize
+                template=f"mantine_{'dark' if use_dark_mode else 'light'}_with_grid",
+            )
+            return fig
+        
+        except Exception as e: #pylint: disable=broad-except
+            err_text = "An error has occurred.<br><br>" + str(e.__class__.__name__) + ': ' + str(e).replace('\n', '<br>')
+            err_fig = error_figure(use_dark_mode, err_text)
+            return err_fig
+
 
 
     def _register_callbacks(self):
         dash.callback(
             Output(self._p('datasource-schema'), 'data', allow_duplicate=True),
-            Output(self._p('app-state'), 'data', allow_duplicate=True),
+            Output(self._p('plot-settings'), 'data', allow_duplicate=True),
             Input('url', 'pathname'), # it's just here to trigger on load, we don't care about the value
-            suppress_callback_exceptions=True,
             prevent_initial_call='initial-duplicate'
         )(self._initialize)
+
 
         dash.callback(
             Output('appshell-aside', 'children', allow_duplicate=True),
             Input(self._p('datasource-schema'), 'data'),
-            suppress_callback_exceptions=True,
             prevent_initial_call=True
         )(self._populate_aside)
+
 
         dash.callback(
             Output('appshell', 'aside', allow_duplicate=True),
@@ -322,9 +398,9 @@ class Distro:
             Input(self._p('tabs'), 'value'),
             State('appshell', 'aside'),
             State(dict(type=self._p('tab-content'), index=dash.ALL), 'style'),
-            suppress_callback_exceptions=True,
             prevent_initial_call=True
         )(self._manage_tab_aside_content)
+
 
         dash.callback(
             Output(self._p('tabs'), 'value', allow_duplicate=True),
@@ -332,9 +408,26 @@ class Distro:
                 dict(type=self._p('close-tab'), index=dash.ALL),
                 'n_clicks',
             ),
-            suppress_callback_exceptions=True,
             prevent_initial_call=True,
         )(self._deactivate_tabs)
+
+
+        dash.callback(
+            Output(self._p('plot-settings'), 'data', allow_duplicate=True),
+            inputs={
+                'columns': dict(x=Input(self._p('x-column-select'), 'value'), y=Input(self._p('y-column-select'), 'value')),
+            },
+            state=dict(plot_settings=State(self._p('plot-settings'), 'data')),
+            prevent_initial_call=True
+        )(self._plot_settings_changed)
+
+
+        dash.callback(
+            Output(self._p('graph'), 'figure', allow_duplicate=True),
+            Input("color-scheme-switch", "checked"),
+            Input(self._p('plot-settings'), 'data'),
+            prevent_initial_call=True
+        )(self._update_graph)
 
 
 @tasks.queue.task(name='fetch_iris')

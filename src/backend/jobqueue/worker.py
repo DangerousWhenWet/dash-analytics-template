@@ -5,5 +5,4 @@ from backend.sql.base import DUCKDB
 
 
 if __name__ == '__main__':
-    DUCKDB.init()
     queue.start()

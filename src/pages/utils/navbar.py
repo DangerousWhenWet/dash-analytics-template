@@ -13,6 +13,10 @@ import pandas as pd
 from pages.utils import extended_page_registry as epr
 
 
+BURGER_CLOSED = DashIconify(icon='oui:menu-right', width=20, height=20)
+BURGER_OPEN = DashIconify(icon='oui:menu-left', width=20, height=20)
+
+
 
 def is_none_or_nan(x:Optional[Any]) -> bool:
     return x is None or pd.isna(x)
@@ -200,16 +204,24 @@ def get_navbar():
 
 @dash.callback(
     Output("appshell", "navbar"),
-    Input("mobile-burger", "opened"),
-    Input("desktop-burger", "opened"),
+    Output("mobile-burger", "children"),
+    Output("desktop-burger", "children"),
+    Input("mobile-burger", "n_clicks"),
+    Input("desktop-burger", "n_clicks"),
     State("appshell", "navbar"),
+    prevent_initial_call=True,
 )
-def toggle_navbar_visible(mobile_opened, desktop_opened, navbar):
+def toggle_navbar_visible(mobile_burger, desktop_burger, navbar):
+    print(f"toggle_navbar_visible({mobile_burger=}, {desktop_burger=})")
     navbar["collapsed"] = {
-        "mobile": not mobile_opened,
-        "desktop": not desktop_opened,
+        "mobile": not navbar['collapsed']['mobile'],
+        "desktop": not navbar['collapsed']['desktop'],
     }
-    return navbar
+    return (
+        navbar,
+        BURGER_CLOSED if navbar["collapsed"]["mobile"] else BURGER_OPEN,
+        BURGER_CLOSED if navbar["collapsed"]["desktop"] else BURGER_OPEN,
+    )
 
 
 @dash.callback(
