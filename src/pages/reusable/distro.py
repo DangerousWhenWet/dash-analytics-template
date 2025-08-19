@@ -302,6 +302,7 @@ class Distro:
     #           modifies DatasourceSchema according to user's selected datasource (also hides the modal)
     def _confirm_datasource(self, _, data_name):
         if data_name is None:
+            print("_confirm_datasource() -> data_name is None")
             return dash.no_update, dash.no_update
         data_df = DuckDBMonitorMiddleware.get_dataframe(f"SELECT * FROM {data_name};")
         schema = DatasourceSchema.from_df(data_name, data_df)
@@ -366,7 +367,11 @@ class Distro:
             plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
             schema = DatasourceSchema(**schema) if schema else DatasourceSchema(columns=[], name="No data")
             if schema.has_data is False:
-                return dash.no_update
+                print("_update_graph() -> schema.has_data is False")
+                #raise ValueError("No data to plot.")
+                err_text = "An error has occurred.<br><br>ValueError: No data to plot."
+                err_fig = error_figure(use_dark_mode, err_text)
+                return err_fig
             if self._datasource_getter:
                 data_name, df = self._datasource_getter()
             else:
@@ -407,9 +412,14 @@ class Distro:
                 uirevision=True, # prevent automatic resize
                 template=f"mantine_{'dark' if use_dark_mode else 'light'}_with_grid",
             )
+            import json
+            print(len(json.dumps(fig.to_dict(), indent=2)))
             return fig
         
         except Exception as e: #pylint: disable=broad-except
+            print(f"Exception in _update_graph: {e.__class__.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             err_text = "An error has occurred.<br><br>" + str(e.__class__.__name__) + ': ' + str(e).replace('\n', '<br>')
             err_fig = error_figure(use_dark_mode, err_text)
             return err_fig
@@ -421,8 +431,10 @@ class Distro:
             Output(self._p('select-datasource-modal'), 'opened', allow_duplicate=True),
             Output(self._p('datasource-schema'), 'data', allow_duplicate=True),
             Output(self._p('plot-settings'), 'data', allow_duplicate=True),
-
             Input('url', 'pathname'), # it's just here to trigger on load, we don't care about the value
+
+            # background=True,
+            # manager=tasks.manager,
             prevent_initial_call='initial-duplicate'
         )(self._initialize)
 
@@ -433,6 +445,9 @@ class Distro:
             Output(self._p('plot-settings'), 'data', allow_duplicate=True),
             Input(self._p('confirm-datasource'), 'n_clicks'),
             State(self._p('select-datasource'), 'value'),
+
+            # background=True,
+            # manager=tasks.manager,
             prevent_initial_call=True
         )(self._confirm_datasource)
 
@@ -441,6 +456,7 @@ class Distro:
             Output('appshell-aside', 'children', allow_duplicate=True),
             Output(self._p('select-datasource-modal'), 'opened', allow_duplicate=True),
             Input(self._p('datasource-schema'), 'data'),
+
             prevent_initial_call=True
         )(self._populate_aside)
 
@@ -451,6 +467,7 @@ class Distro:
             Input(self._p('tabs'), 'value'),
             State('appshell', 'aside'),
             State(dict(type=self._p('tab-content'), index=dash.ALL), 'style'),
+
             prevent_initial_call=True
         )(self._manage_tab_aside_content)
 
@@ -461,6 +478,7 @@ class Distro:
                 dict(type=self._p('close-tab'), index=dash.ALL),
                 'n_clicks',
             ),
+
             prevent_initial_call=True,
         )(self._deactivate_tabs)
 
@@ -471,22 +489,24 @@ class Distro:
                 'columns': dict(x=Input(self._p('x-column-select'), 'value'), y=Input(self._p('y-column-select'), 'value')),
             },
             state=dict(plot_settings=State(self._p('plot-settings'), 'data')),
+
             prevent_initial_call=True
         )(self._plot_settings_changed)
 
 
         dash.callback(
-            Output(self._p('graph'), 'figure', allow_duplicate=True),
+            Output(self._p('graph'), 'figure'),
             Input("color-scheme-switch", "checked"),
             Input(self._p('plot-settings'), 'data'),
             Input(self._p('datasource-schema'), 'data'),
-            prevent_initial_call=True
+
+            background=True,
+            manager=tasks.manager,
+            prevent_initial_call=True,
+            #cache_args_to_ignore=[0, 1, 2]  # ignore plot-settings and datasource-schema
+            #cache_by=[] # disable cache
         )(self._update_graph)
 
-
-@tasks.queue.task(name='fetch_iris')
-def _fetch_iris():
-    return ("iris",   DuckDBMonitorMiddleware.get_dataframe("SELECT * FROM iris;"))
 
 distro_demo_with_dataset = Distro(
     id_prefix='distro-demo_set-',
@@ -498,7 +518,7 @@ distro_demo_with_dataset = Distro(
         tags=['meta', 'demo', 'reusable', 'distribution', 'scatter'],
         icon='flat-color-icons:scatter-plot',
     )),
-    datasource_getter=_fetch_iris
+    datasource_getter=lambda: ("iris",   DuckDBMonitorMiddleware.get_dataframe("SELECT * FROM iris;"))
 )
 
 
