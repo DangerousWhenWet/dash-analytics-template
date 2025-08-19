@@ -25,6 +25,7 @@ class Column(BaseModel):
 class DatasourceSchema(BaseModel):
     columns: List[Column]
     name: str
+    query: Optional[str] = None
 
     @property
     def has_data(self) -> bool:
@@ -88,15 +89,35 @@ class Distro:
         self._tab_values: List[str] = ['tab-plots', 'tab-filters', 'tab-overlays']
         self._datasource_getter = datasource_getter
 
-        dash.register_page(**(page_registry|{'layout': self.layout()}))
+        dash.register_page(**(page_registry|{'layout': self.layout}))
         self._register_callbacks()
 
 
     def layout(self):
         return [
-            dcc.Store(id=self._p('datasource-schema')),
-            dcc.Store(id=self._p('plot-settings')),
+            dcc.Store(id=self._p('datasource-schema'), data=None),
+            dcc.Store(id=self._p('plot-settings'), data=None),
 
+            dmc.Modal(
+                title=[dmc.Text([
+                    "There is no datasource selected for visualization. Please select a built-in source below, or ",
+                    dmc.Anchor("upload your own data first at the Data Gallery", size='sm', href="/data-gallery", target="_blank"),
+                    "."
+                ], size='sm')],
+                id=self._p('select-datasource-modal'),
+                size='lg',
+                centered=True,
+                closeOnClickOutside=False,
+                children=[
+                    dmc.Select(
+                        id=self._p('select-datasource'),
+                        label='Built-in Datasets',
+                        placeholder='Select one...',
+                        data=DuckDBMonitorMiddleware.ask_available_tables(),
+                    ),
+                    dmc.Button('Confirm', id=self._p('confirm-datasource'), mt=2),
+                ]
+            ),
 
             dmc.Group(
                 wrap='nowrap',
@@ -268,12 +289,29 @@ class Distro:
                 x_column=schema.columns[0].key,
                 y_column=schema.columns[1].key if len(schema.columns) > 1 else schema.columns[0].key
             )
+            show_modal=False
         else:
             schema = DatasourceSchema(columns=[], name="No data")
             plot_settings = PlotSettings()
-        #print(f"_initialize({schema=}, {state=})")
-        return schema.model_dump(), plot_settings.model_dump()
+            show_modal=True
+        
+        return show_modal, schema.model_dump(), plot_settings.model_dump()
 
+
+    # CALLBACK, triggered by confirm button in modal
+    #           modifies DatasourceSchema according to user's selected datasource (also hides the modal)
+    def _confirm_datasource(self, _, data_name):
+        if data_name is None:
+            return dash.no_update, dash.no_update
+        data_df = DuckDBMonitorMiddleware.get_dataframe(f"SELECT * FROM {data_name};")
+        schema = DatasourceSchema.from_df(data_name, data_df)
+        plot_settings = PlotSettings(
+            x_column=schema.columns[0].key,
+            y_column=schema.columns[1].key if len(schema.columns) > 1 else schema.columns[0].key
+        )
+        return False, schema.model_dump(), plot_settings.model_dump()
+        
+        
 
 
     # CALLBACK, triggered by modification of DatasourceSchema
@@ -284,8 +322,8 @@ class Distro:
         return (
             self._tab_content_plot_settings(schema),
             self._tab_content_filters(schema),
-            self._tab_content_overlays(schema)
-        )
+            self._tab_content_overlays(schema),
+        ), not schema.has_data
         
 
 
@@ -314,6 +352,7 @@ class Distro:
     #CALLBACK, triggered by interaction with anything in the Plot Settings tab
     #          mutates the plot-settings Store
     def _plot_settings_changed(self, columns, plot_settings):
+        #print(f"_plot_settings_changed({columns=}, {plot_settings=})")
         plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
         plot_settings.x_column = columns['x']
         plot_settings.y_column = columns['y']
@@ -321,10 +360,19 @@ class Distro:
 
     #CALLBACK, interaction with any of PlotSettings, ..., or the theme switcher
     #          updates the graph
-    def _update_graph(self, use_dark_mode, plot_settings):
+    def _update_graph(self, use_dark_mode, plot_settings, schema):
+        print(f"_update_graph({use_dark_mode=},   {plot_settings=},   {schema=})")
         try:
             plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
-            data_name, df = self._datasource_getter() #type:ignore
+            schema = DatasourceSchema(**schema) if schema else DatasourceSchema(columns=[], name="No data")
+            if schema.has_data is False:
+                return dash.no_update
+            if self._datasource_getter:
+                data_name, df = self._datasource_getter()
+            else:
+                data_name = schema.name
+                df = DuckDBMonitorMiddleware.get_dataframe(f"SELECT * FROM {data_name};")
+
             fig = make_subplots(
                 rows=2, row_heights=[0.1, 0.9],
                 cols=2, column_widths=[0.9, 0.1],
@@ -348,15 +396,7 @@ class Distro:
                 ),
                 row=2, col=2
             )
-        # fig.update_layout(
-        #     title=f"<b>{page.title}:</b> {page.plottables[range].name} vs. {page.plottables[domain].name}",
-        #     margin=dict(l=0, r=0, t=40, b=10),
-        #     barmode='overlay',
-        #     showlegend=show_legend,
-        #     legend=(legend_config|{'bgcolor':hex_to_rgba('FFFFFF', 0.500), 'orientation':legend_orientation}),
-        #     boxgap=0.1,
-        #     uirevision=True, # prevent automatic resize
-        # )
+
             fig.update_layout(
                 title=f"<b>{data_name}:</b> {plot_settings.y_column} vs. {plot_settings.x_column}",
                 margin=dict(l=0, r=0, t=40, b=10),
@@ -378,15 +418,28 @@ class Distro:
 
     def _register_callbacks(self):
         dash.callback(
+            Output(self._p('select-datasource-modal'), 'opened', allow_duplicate=True),
             Output(self._p('datasource-schema'), 'data', allow_duplicate=True),
             Output(self._p('plot-settings'), 'data', allow_duplicate=True),
+
             Input('url', 'pathname'), # it's just here to trigger on load, we don't care about the value
             prevent_initial_call='initial-duplicate'
         )(self._initialize)
 
 
         dash.callback(
+            Output(self._p('select-datasource-modal'), 'opened', allow_duplicate=True),
+            Output(self._p('datasource-schema'), 'data', allow_duplicate=True),
+            Output(self._p('plot-settings'), 'data', allow_duplicate=True),
+            Input(self._p('confirm-datasource'), 'n_clicks'),
+            State(self._p('select-datasource'), 'value'),
+            prevent_initial_call=True
+        )(self._confirm_datasource)
+
+
+        dash.callback(
             Output('appshell-aside', 'children', allow_duplicate=True),
+            Output(self._p('select-datasource-modal'), 'opened', allow_duplicate=True),
             Input(self._p('datasource-schema'), 'data'),
             prevent_initial_call=True
         )(self._populate_aside)
@@ -426,6 +479,7 @@ class Distro:
             Output(self._p('graph'), 'figure', allow_duplicate=True),
             Input("color-scheme-switch", "checked"),
             Input(self._p('plot-settings'), 'data'),
+            Input(self._p('datasource-schema'), 'data'),
             prevent_initial_call=True
         )(self._update_graph)
 
@@ -437,12 +491,25 @@ def _fetch_iris():
 distro_demo_with_dataset = Distro(
     id_prefix='distro-demo_set-',
     page_registry=cast(PageRegistryInput, dict(
-        module=__name__,
+        module="distro_bakedin",
         name='Distro Demo, Baked-in Dataset',
-        path='/demos/distro',
+        path='/demos/distro/baked-in',
         description='Demonstration of a versatile scatterplot distribution visualizer.',
         tags=['meta', 'demo', 'reusable', 'distribution', 'scatter'],
         icon='flat-color-icons:scatter-plot',
     )),
     datasource_getter=_fetch_iris
+)
+
+
+distro_demo_without_dataset = Distro(
+    id_prefix='distro-demo_byod-',
+    page_registry=cast(PageRegistryInput, dict(
+        module="distro_byod",
+        name='Distro Demo, BYO-Dataset',
+        path='/demos/distro/byod',
+        description='Demonstration of a versatile scatterplot distribution visualizer.',
+        tags=['meta', 'demo', 'reusable', 'distribution', 'scatter'],
+        icon='flat-color-icons:scatter-plot',
+    ))
 )

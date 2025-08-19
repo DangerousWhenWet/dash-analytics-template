@@ -28,7 +28,7 @@ class DuckDBMonitorMiddleware:
     of DuckDB tables)
     """
     @staticmethod
-    def _ask_available_tables(conn:Optional[duckdb.DuckDBPyConnection]=None) -> List[str]:
+    def ask_available_tables(conn:Optional[duckdb.DuckDBPyConnection]=None) -> List[str]:
         sql = """
             SELECT table_name 
             FROM duckdb_tables() 
@@ -43,7 +43,7 @@ class DuckDBMonitorMiddleware:
         if conn:
             result_set = conn.execute(sql, params).fetchall()
         else:
-            with duckdb.connect(read_only=True) as conn:
+            with duckdb.connect(DUCKDB.PATH, read_only=True) as conn:
                 result_set = conn.execute(sql, params).fetchall()
         return [row[0] for row in result_set]
 
@@ -98,7 +98,7 @@ class DuckDBMonitorMiddleware:
 
     @staticmethod
     def log_query(sql: str, conn:duckdb.DuckDBPyConnection):
-        tables = DuckDBMonitorMiddleware._ask_available_tables(conn)
+        tables = DuckDBMonitorMiddleware.ask_available_tables(conn)
 
         # find which tables are referenced in the query:
         #     occurence of any of `tables` in the query counts as a "hit" to the table, regardless of which clause it's in
@@ -107,34 +107,58 @@ class DuckDBMonitorMiddleware:
         if referenced_tables := DuckDBMonitorMiddleware._find_referenced_tables(sql, tables):
             DuckDBMonitorMiddleware.log_table_usage(referenced_tables, conn=conn, ensure_exists=True)
     
+    # @staticmethod
+    # def log_table_usage(tables: List[str], conn:Optional[duckdb.DuckDBPyConnection]=None, ensure_exists:bool=True):
+    #     sql_ensure_exists = """
+    #         INSERT INTO administrative.usage_tracking (table_name)
+    #         SELECT UNNEST(?)
+    #         ON CONFLICT (table_name) DO NOTHING;
+    #     """
+    #     params_ensure_exists = [DuckDBMonitorMiddleware.ask_available_tables(conn)]
+
+    #     sql_increment_hits = """
+    #         UPDATE administrative.usage_tracking
+    #         SET hits = hits + 1, last_hit = CURRENT_TIMESTAMP
+    #         WHERE table_name IN (SELECT UNNEST(?));
+    #     """
+    #     params_increment_hits = [tables]
+        
+    #     if conn:
+    #         if ensure_exists:
+    #             conn.execute(sql_ensure_exists, params_ensure_exists)
+    #         conn.execute(sql_increment_hits, params_increment_hits)
+    #     else:
+    #         with duckdb.connect(DUCKDB.PATH) as conn:
+    #             if ensure_exists:
+    #                 conn.execute(sql_ensure_exists, params_ensure_exists)
+    #             conn.execute(sql_increment_hits, params_increment_hits)
+
     @staticmethod
     def log_table_usage(tables: List[str], conn:Optional[duckdb.DuckDBPyConnection]=None, ensure_exists:bool=True):
-        sql_ensure_exists = """
-            INSERT INTO administrative.usage_tracking (table_name)
-            SELECT UNNEST(?)
-            ON CONFLICT (table_name) DO NOTHING;
+        sql_upsert = """
+            INSERT INTO administrative.usage_tracking (table_name, hits, last_hit)
+            SELECT table_name, 1, NOW()
+            FROM (SELECT UNNEST(?) AS table_name)
+            ON CONFLICT (table_name) DO UPDATE SET
+                hits = hits + 1,
+                last_hit = NOW();
         """
-        params_ensure_exists = [DuckDBMonitorMiddleware._ask_available_tables(conn)]
-
-        sql_increment_hits = """
-            UPDATE administrative.usage_tracking
-            SET hits = hits + 1, last_hit = CURRENT_TIMESTAMP
-            WHERE table_name IN (SELECT UNNEST(?));
-        """
-        params_increment_hits = [tables]
+        params_upsert = [tables]
         
-        if conn:
-            if ensure_exists:
-                conn.execute(sql_ensure_exists, params_ensure_exists)
-            conn.execute(sql_increment_hits, params_increment_hits)
-        else:
-            with duckdb.connect(DUCKDB.PATH) as conn:
-                if ensure_exists:
-                    conn.execute(sql_ensure_exists, params_ensure_exists)
-                conn.execute(sql_increment_hits, params_increment_hits)
+        try:
+            if conn:
+                conn.execute(sql_upsert, params_upsert)
+            else:
+                with duckdb.connect(DUCKDB.PATH) as conn:
+                    conn.execute(sql_upsert, params_upsert)
+        except duckdb.TransactionException:
+            # NOTE: with high concurrency on same record this can happen. e.g. multiple celery workers hitting on the same datasource.
+            #       we are dealing with the problem by applying an Ostrich Algorithm ;)
+            pass
 
     @staticmethod
-    def get_dataframe(sql: str, *args, **kwargs):
+    def get_dataframe(sql: str, skip_logging:bool=False, *args, **kwargs):
         with ignore_warnings(), duckdb.connect(DUCKDB.PATH, *args, **kwargs) as conn:
-            DuckDBMonitorMiddleware.log_query(sql, conn)
+            if not skip_logging:
+                DuckDBMonitorMiddleware.log_query(sql, conn)
             return pd.read_sql(sql, conn)
