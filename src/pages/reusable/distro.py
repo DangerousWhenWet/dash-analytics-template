@@ -798,9 +798,9 @@ class Distro:
                     'clear_filters': Input(self._p('clear-filters'), 'n_clicks'),
                 },
                 'individual_filter_controls': {
-                    'negate': Input(dict(type='filter',  prefix=self._p(''), component='negate', column=dash.ALL, index=dash.ALL), 'value'),
+                    'negate': Input(dict(type='filter',  prefix=self._p(''), component='negate', column=dash.ALL, index=dash.ALL), 'checked'),
                     'operator': Input(dict(type='filter', prefix=self._p(''), component='operator', column=dash.ALL, index=dash.ALL), 'value'),
-                    'enable': Input(dict(type='filter',  prefix=self._p(''), component='enable', column=dash.ALL, index=dash.ALL), 'value'),
+                    'enable': Input(dict(type='filter',  prefix=self._p(''), component='enable', column=dash.ALL, index=dash.ALL), 'checked'),
                     'value': Input(dict(type='filter',  prefix=self._p(''), component='value', column=dash.ALL, index=dash.ALL), 'value'),
                     'remove': Input(dict(type='filter',  prefix=self._p(''), component='remove', column=dash.ALL, index=dash.ALL), 'n_clicks'),
                 },
