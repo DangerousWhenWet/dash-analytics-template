@@ -1,6 +1,9 @@
 #pylint: disable=missing-docstring, trailing-whitespace, line-too-long
 import datetime as dt
-from typing import cast, Optional, List, Dict, Tuple, Literal, Any, Callable
+import functools
+import itertools
+import traceback
+from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict
 
 import dash
 from dash import dcc, html, Input, Output, State
@@ -10,17 +13,37 @@ import pandas as pd
 from plotly.colors import qualitative as qualitative_color_scales
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.jobqueue import tasks
 from backend.sql.duck import DuckDBMonitorMiddleware
-from pages.utils.etc import make_prefixer
+from pages.utils.etc import make_prefixer, interleave_with_dividers
 from pages.utils.extended_page_registry import PageRegistryInput
+
+
+class PatternMatchIdType(TypedDict):
+    prefix: str
+    column: str
+    index: int
 
 
 class Column(BaseModel):
     key: str
-    dtype: Literal['str', 'int', 'float', 'bool', 'date', 'datetime']
+    dtype: Literal['str', 'category', 'int', 'float', 'bool', 'date', 'datetime']
+    # icon_map: ClassVar[Dict[str,str]] = {
+    #     'str': 'radix-icons:text',
+    #     'category': 'material-symbols:category-outline',
+    #     'int': 'carbon:string-integer',
+    #     'float': 'lsicon:decimal-filled',
+    #     'bool': 'ix:data-type-boolean',
+    #     'date': 'fluent-mdl2:event-date',
+    #     'datetime': 'fluent-mdl2:date-time',
+    # }
+
+    @property
+    def dtyped_key(self) -> str:
+        return f"{self.key}<<{self.dtype}>>"
+
 
 class DatasourceSchema(BaseModel):
     columns: List[Column]
@@ -42,7 +65,186 @@ class DatasourceSchema(BaseModel):
 class PlotSettings(BaseModel):
     x_column: Optional[str] = None
     y_column: Optional[str] = None
+    filters: List["FilterUnionType"] = []
 
+
+class FilterPatternMatchIdType(PatternMatchIdType):
+    # keys: prefix, column, index, component
+    component: Literal['negate', 'operator', 'enable', 'value', 'remove']
+
+class Filter(BaseModel):
+    _flag_for_removal: bool = False
+    column: str
+    enabled: bool = True
+    negated: bool = False
+    prefix: str # get this from the Distro owner object
+    index: int  # get this from `n_click` prop of the "add filter" button
+    # the following attributes exist for all Filter subclasses but their exact type depends on the subclass. override in subclasses
+    operator: Optional[Any] = None
+    value: Optional[Any] = None
+
+    # @property
+    # def layout(self):
+    #     raise NotImplementedError
+
+    @property
+    def dash_ids(self) -> Tuple[FilterPatternMatchIdType, FilterPatternMatchIdType, FilterPatternMatchIdType, FilterPatternMatchIdType, FilterPatternMatchIdType]:
+        """returns (
+            `id_of_negate_toggle`, 
+            `id_of_filter_operator_select`, 
+            `id_of_enable_checkbox`,
+            `id_of_filter_value_input`,
+            `id_of_remove_filter_button`
+        )"""
+        #return dict(prefix=self.prefix, column=self.column, index=self.index)
+        return (
+            dict(type='filter', prefix=self.prefix, column=self.column, index=self.index, component='negate'),
+            dict(type='filter', prefix=self.prefix, column=self.column, index=self.index, component='operator'),
+            dict(type='filter', prefix=self.prefix, column=self.column, index=self.index, component='enable'),
+            dict(type='filter', prefix=self.prefix, column=self.column, index=self.index, component='value'),
+            dict(type='filter', prefix=self.prefix, column=self.column, index=self.index, component='remove'),
+        ) #type: ignore
+
+    def mutate(self, callback_input:Dict[str, Any]):
+        component = callback_input['id']['component']
+        value = callback_input['value']
+        if component == 'negate':
+            self.negated = value
+        elif component == 'operator':
+            self.operator = value
+        elif component == 'enable':
+            self.enabled = value
+        elif component == 'value':
+            self.value = value
+        elif component == 'remove':
+            self._flag_for_removal = True
+
+
+StringOperatorType = Literal['contains', 'startswith', 'endswith', 'equals', 'regex']
+class StringFilter(Filter):
+    dtype: Literal['str'] = 'str'
+    icon: ClassVar[str] = 'radix-icons:text'
+    value: Optional[str] = None
+    operator: Optional[StringOperatorType] = 'contains'
+
+    @property
+    def layout(self):
+        id_neg, id_op, id_enab, id_val, id_del = self.dash_ids
+        return dmc.Card(
+            withBorder=True,
+            children=[
+                dmc.CardSection(children=[
+                    dmc.Group(
+                        wrap='nowrap',
+                        children=[
+                            DashIconify(icon=self.icon, width=20, height=20),
+                            dmc.Tooltip(
+                                children=dmc.Text(
+                                    children=self.column,
+                                    size="sm",
+                                    fw="bold",
+                                    truncate='end',
+                                    flex=1,
+                                    # make it look like a dmc.Code
+                                    c="var(--mantine-color-text)", #type: ignore
+                                    bg="var(--mantine-color-gray-1)", #type: ignore
+                                    ff="monospace",
+                                    px=1,
+                                    py=1,
+                                    style={"borderRadius": "4px", "border": "1px solid var(--mantine-color-gray-3)"}
+                                ),
+                                label=self.column,
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                                boxWrapperProps={'flex': '1'},
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.Switch(
+                                    id=id_neg, #type: ignore
+                                    offLabel=DashIconify(icon="mdi:equal", width=15,),
+                                    onLabel=DashIconify(icon="ic:baseline-not-equal", width=15,),
+                                    checked=self.negated
+                                ),
+                                label="Logical negation: EQUAL or NOT EQUAL",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            ),
+                            dmc.Select(
+                                id=id_op, #type: ignore
+                                data=get_args(StringOperatorType),
+                                value=self.operator,
+                                clearable=False,
+                                size="xs",
+                                w='33%',
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.Checkbox(
+                                    id=id_enab, #type: ignore
+                                    checked=self.enabled,
+                                    size="xs",
+                                ),
+                                label="Enable/disable filter",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            )
+                        ]
+                    ),
+                    dmc.Group(
+                        wrap='nowrap',
+                        children=[
+                            dmc.TextInput(
+                                id=id_val, #type: ignore
+                                value=self.value,
+                                placeholder="Filter value",
+                                size="xs",
+                                flex=1,
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.ActionIcon(
+                                    DashIconify(icon='material-symbols:close', width=20, height=20),
+                                    id=id_del, #type: ignore
+                                    variant='transparent',
+                                    size='xs',
+                                ),
+                                label="Remove filter",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            )
+                        ]
+                    )
+                ])
+            ]
+        )
+
+
+    def mask(self, df:pd.DataFrame,) -> pd.Series:
+        if any((self.value is None, self.value=='', self.enabled is False)): return pd.Series(True, index=df.index)
+        match self.operator:
+            case 'contains':    mask = df[self.column].str.contains(self.value, na=False) #type: ignore
+            case 'startswith':  mask = df[self.column].str.startswith(self.value, na=False) #type: ignore
+            case 'endswith':    mask = df[self.column].str.endswith(self.value, na=False) #type: ignore
+            case 'equals':      mask = df[self.column] == self.value
+            case 'regex':       mask = df[self.column].str.contains(self.value, regex=True, case=False, na=False) #type: ignore
+            case _: raise ValueError(f"Unknown operator: {self.operator}")
+        return ~mask if self.negated else mask
+
+FilterUnionType = FilterUnion = Annotated[
+    Union[StringFilter,],
+    Field(discriminator='dtype')
+]
+FILTER_DTYPE_MAP = {
+    'str': StringFilter,
+    # 'category': CategoryFilter,
+    # 'int': IntFilter,
+    # 'float': FloatFilter,
+    # 'bool': BoolFilter,
+    # 'date': DateFilter,
+    # 'datetime': DateTimeFilter
+}
 
 
 def make_tab_close_button(tab_id:Dict[str, Any]):
@@ -210,9 +412,10 @@ class Distro:
 
 
     def _tab_content_plot_settings(self, schema:DatasourceSchema):
-        col_keys = [col.key for col in schema.columns]
+        col_dtyped_keys = [{'value': col.dtyped_key, 'label': col.key} for col in schema.columns]
         return dmc.Box(
             id=dict(type=self._p('tab-content'), index=self._tab_values.index('tab-plots')),
+            p=2,
             children=[
                 make_tab_close_button(dict(type=self._p('close-tab'), index='tab-plots')),
 
@@ -241,17 +444,19 @@ class Distro:
                         leftSection=DashIconify(icon='emojione-monotone:letter-x', width=20,height=20),
                         leftSectionPointerEvents='none',
                         id=self._p('x-column-select'),
-                        data=col_keys,
-                        value=col_keys[0] if len(col_keys) > 1 else None,
+                        data=col_dtyped_keys, #type:ignore
+                        value=col_dtyped_keys[0]['value'] if len(col_dtyped_keys) > 1 else None,
                         clearable=False,
+                        renderOption={'function': "renderSelectOptionDtypeRight"},
                     ),
                     dmc.Select(
                         leftSection=DashIconify(icon='emojione-monotone:letter-y', width=20,height=20),
                         leftSectionPointerEvents='none',
                         id=self._p('y-column-select'),
-                        data=col_keys,
-                        value=col_keys[1] if len(col_keys) > 1 else None,
+                        data=col_dtyped_keys, #type:ignore
+                        value=col_dtyped_keys[1]['value'] if len(col_dtyped_keys) > 1 else None,
                         clearable=False,
+                        renderOption={'function': "renderSelectOptionDtypeRight"},
                     )
                 ])
             ]
@@ -261,9 +466,36 @@ class Distro:
     def _tab_content_filters(self, schema:DatasourceSchema):
         return dmc.Box(
             id=dict(type=self._p('tab-content'), index=self._tab_values.index('tab-filters')),
+            p=2,
             children=[
                 make_tab_close_button(dict(type=self._p('close-tab'), index='tab-filters')),
-                dmc.Text("Filters")
+                dmc.Group(
+                    children=[
+                        dmc.Select(
+                            id=self._p('select-filter-field'),
+                            data=[{'value': f"{col.key}<<{col.dtype}>>", 'label': col.key} for col in schema.columns], #type: ignore
+                            value=None,
+                            placeholder="Select a field to filter on",
+                            clearable=False,
+                            searchable=True,
+                            renderOption={'function': "renderSelectOptionDtypeRight"},
+                            flex=1,
+                        ),
+                        dmc.ActionIcon(
+                            DashIconify(icon='icons8:plus', width=20, height=20),
+                            id=self._p('add-filter'),
+                            size='sm',
+                        ),
+                    ],
+                ),
+                dmc.Divider(my=4),
+                dmc.Center(dmc.Button(
+                        "Clear Filters",
+                        id=self._p('clear-filters'),
+                        leftSection=DashIconify(icon='carbon:erase', width=20, height=20),
+                        color='red',
+                ), mb=2),
+                dmc.Box(id=self._p('filters'), children=[], p=2),
             ]
         )
 
@@ -302,7 +534,7 @@ class Distro:
     #           modifies DatasourceSchema according to user's selected datasource (also hides the modal)
     def _confirm_datasource(self, _, data_name):
         if data_name is None:
-            print("_confirm_datasource() -> data_name is None")
+            #print("_confirm_datasource() -> data_name is None")
             return dash.no_update, dash.no_update
         data_df = DuckDBMonitorMiddleware.get_dataframe(f"SELECT * FROM {data_name};")
         schema = DatasourceSchema.from_df(data_name, data_df)
@@ -325,6 +557,14 @@ class Distro:
             self._tab_content_filters(schema),
             self._tab_content_overlays(schema),
         ), not schema.has_data
+    
+
+    # CALLBACK, triggered by modification of PlotSettings (specifically we care about plot_settings.filters)
+    #           modifies the contents of the filters dmc.Box
+    def _populate_filters(self, plot_settings):
+        plot_settings = PlotSettings(**plot_settings) if plot_settings is not None else PlotSettings()
+        #print(f"_populate_filters({plot_settings=})") #<-- plot_settings.filters now contains only base Filter objects
+        return interleave_with_dividers([f.layout for f in plot_settings.filters])
         
 
 
@@ -352,22 +592,75 @@ class Distro:
 
     #CALLBACK, triggered by interaction with anything in the Plot Settings tab
     #          mutates the plot-settings Store
-    def _plot_settings_changed(self, columns, plot_settings):
-        #print(f"_plot_settings_changed({columns=}, {plot_settings=})")
+    def _plot_settings_changed(self, columns, global_filter_control, individual_filter_controls, plot_settings, schema):
+        print('='*80)
+        # print(f"_plot_settings_changed({columns=}, {global_filter_control=}, {individual_filter_controls=}, {plot_settings=})")
+        #print(f"{dash.callback_context.triggered=}")
+        print(f"{dash.callback_context.triggered_id=}")
+        print(f"{type(dash.callback_context.triggered_id)=}")
+        print(f"{dash.callback_context.inputs_list=}")
+        print(f"{individual_filter_controls=}")
+        
+        trig_id = dash.callback_context.triggered_id
         plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
-        plot_settings.x_column = columns['x']
-        plot_settings.y_column = columns['y']
+
+        # ===== "Plot Settings" tab ======
+        plot_settings.x_column = columns['x'].split('<<')[0] if columns['x'] else None
+        plot_settings.y_column = columns['y'].split('<<')[0] if columns['y'] else None
+
+        # ===== "Filters" tab ======
+        # global filter controls
+        if trig_id == self._p('add-filter') and global_filter_control['selected_filter_field'] is not None:
+            field, dtype = global_filter_control['selected_filter_field'].split('<<')
+            dtype = dtype[:-2] if dtype.endswith('>>') else dtype
+            FilterType = FILTER_DTYPE_MAP[dtype] #pylint: disable=invalid-name
+            plot_settings.filters.append(FilterType(
+                column=field,
+                prefix=self._p(''),
+                index=global_filter_control['add_filter'] #n-clicks
+            ))
+        # individual filter controls
+        elif not isinstance(trig_id, str):
+            trig_id = cast(Mapping[str, Any], trig_id)
+            if trig_id.get('type') == 'filter':
+                # dash.callback_context.inputs_list is List[Union[Dict[str, Any], List[Dict[str, Any]]]]
+                # we need to flatten it in order to seek the input that triggered the callback
+                trig_input: Optional[Dict[str, Any]] = next(
+                    (x for x in itertools.chain.from_iterable(
+                        item if isinstance(item, list) else [item] 
+                        for item in dash.callback_context.inputs_list
+                    ) if x['id'] == trig_id),
+                    None
+                )
+                print(f"{trig_input=}")
+                corresponding_filter: Optional[FilterUnionType] = next(
+                    (f for f in plot_settings.filters if all((
+                        f.column == trig_id['column'],
+                        f.index == trig_id['index'],
+                    ))),
+                    None
+                )
+                print(f"{corresponding_filter=}")
+                if trig_input is not None and corresponding_filter is not None:
+                    corresponding_filter.mutate(trig_input)
+                    for f in plot_settings.filters:
+                        if f._flag_for_removal:
+                            print(f"DESTROYING {f=}")
+                            plot_settings.filters.remove(f)
+
+
         return plot_settings.model_dump()
+
 
     #CALLBACK, interaction with any of PlotSettings, ..., or the theme switcher
     #          updates the graph
     def _update_graph(self, use_dark_mode, plot_settings, schema):
-        print(f"_update_graph({use_dark_mode=},   {plot_settings=},   {schema=})")
+        #print(f"_update_graph({use_dark_mode=},   {plot_settings=},   {schema=})")
         try:
             plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
             schema = DatasourceSchema(**schema) if schema else DatasourceSchema(columns=[], name="No data")
             if schema.has_data is False:
-                print("_update_graph() -> schema.has_data is False")
+                #print("_update_graph() -> schema.has_data is False")
                 #raise ValueError("No data to plot.")
                 err_text = "An error has occurred.<br><br>ValueError: No data to plot."
                 err_fig = error_figure(use_dark_mode, err_text)
@@ -377,6 +670,10 @@ class Distro:
             else:
                 data_name = schema.name
                 df = DuckDBMonitorMiddleware.get_dataframe(f"SELECT * FROM {data_name};")
+            
+            # ===== Filters =====
+            boolmasks = [f.mask(df) for f in plot_settings.filters]
+            df = df[functools.reduce(lambda l,r: (l & r), boolmasks, pd.Series(True, index=df.index))]
 
             fig = make_subplots(
                 rows=2, row_heights=[0.1, 0.9],
@@ -412,15 +709,15 @@ class Distro:
                 uirevision=True, # prevent automatic resize
                 template=f"mantine_{'dark' if use_dark_mode else 'light'}_with_grid",
             )
-            import json
-            print(len(json.dumps(fig.to_dict(), indent=2)))
+            # import json
+            # print(len(json.dumps(fig.to_dict(), indent=2)))
             return fig
         
         except Exception as e: #pylint: disable=broad-except
-            print(f"Exception in _update_graph: {e.__class__.__name__}: {e}")
-            import traceback
-            traceback.print_exc()
+            #print(f"Exception in _update_graph: {e.__class__.__name__}: {e}")
+            traceback_text = traceback.format_exc().replace('\n', '<br>')
             err_text = "An error has occurred.<br><br>" + str(e.__class__.__name__) + ': ' + str(e).replace('\n', '<br>')
+            err_text += '<br><br>' + traceback_text
             err_fig = error_figure(use_dark_mode, err_text)
             return err_fig
 
@@ -462,6 +759,14 @@ class Distro:
 
 
         dash.callback(
+            Output(self._p('filters'), 'children', allow_duplicate=True),
+            Input(self._p('plot-settings'), 'data'),
+
+            prevent_initial_call=True
+        )(self._populate_filters)
+
+
+        dash.callback(
             Output('appshell', 'aside', allow_duplicate=True),
             Output(dict(type=self._p('tab-content'), index=dash.ALL), 'style', allow_duplicate=True),
             Input(self._p('tabs'), 'value'),
@@ -487,8 +792,23 @@ class Distro:
             Output(self._p('plot-settings'), 'data', allow_duplicate=True),
             inputs={
                 'columns': dict(x=Input(self._p('x-column-select'), 'value'), y=Input(self._p('y-column-select'), 'value')),
+                'global_filter_control': {
+                    'selected_filter_field': Input(self._p('select-filter-field'), 'value'),
+                    'add_filter': Input(self._p('add-filter'), 'n_clicks'),
+                    'clear_filters': Input(self._p('clear-filters'), 'n_clicks'),
+                },
+                'individual_filter_controls': {
+                    'negate': Input(dict(type='filter',  prefix=self._p(''), component='negate', column=dash.ALL, index=dash.ALL), 'value'),
+                    'operator': Input(dict(type='filter', prefix=self._p(''), component='operator', column=dash.ALL, index=dash.ALL), 'value'),
+                    'enable': Input(dict(type='filter',  prefix=self._p(''), component='enable', column=dash.ALL, index=dash.ALL), 'value'),
+                    'value': Input(dict(type='filter',  prefix=self._p(''), component='value', column=dash.ALL, index=dash.ALL), 'value'),
+                    'remove': Input(dict(type='filter',  prefix=self._p(''), component='remove', column=dash.ALL, index=dash.ALL), 'n_clicks'),
+                },
             },
-            state=dict(plot_settings=State(self._p('plot-settings'), 'data')),
+            state=dict(
+                plot_settings=State(self._p('plot-settings'), 'data'),
+                schema=State(self._p('datasource-schema'), 'data'),
+            ),
 
             prevent_initial_call=True
         )(self._plot_settings_changed)

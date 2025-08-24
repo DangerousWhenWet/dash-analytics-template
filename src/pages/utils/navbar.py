@@ -1,7 +1,6 @@
 #pylint: disable=missing-docstring, line-too-long, trailing-whitespace
 from dataclasses import dataclass
-import itertools
-from typing import cast, Optional, Any, List, Iterable
+from typing import cast, Optional, Any, List
 
 import dash
 from dash import html, Input, Output, State
@@ -11,6 +10,7 @@ import dash_mantine_components as dmc
 import pandas as pd
 
 from pages.utils import extended_page_registry as epr
+from pages.utils import etc
 
 
 BURGER_CLOSED = DashIconify(icon='oui:menu-right', width=20, height=20)
@@ -21,9 +21,7 @@ BURGER_OPEN = DashIconify(icon='oui:menu-left', width=20, height=20)
 def is_none_or_nan(x:Optional[Any]) -> bool:
     return x is None or pd.isna(x)
 
-def interleave_with_dividers(items:Iterable[Component], divider:dmc.Divider = dmc.Divider(size="xs", color="lightgrey", my="xs")) -> List[Component]: #type:ignore
-    #interleave dividers between items e.g. [item1, divider, item2, divider, item3, ...]
-    return list(itertools.chain.from_iterable(zip(items, itertools.repeat(divider))))[:-1]
+
 
 
 
@@ -148,7 +146,7 @@ def initialize():
             icon='unjs:image-meta'
         ).layout(cast(
             List[Component],
-            interleave_with_dividers(
+            etc.interleave_with_dividers(
                 [NavbarLink.from_page(epr.get_entry(epr.epr.index == idx)).layout   for idx in epr.with_tags(tags=['meta'], blacklist=['suppressed']).index]
             )
         )),
