@@ -14,7 +14,7 @@ import pandas as pd
 from plotly.colors import qualitative as qualitative_color_scales, sequential as continuous_color_scales
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from backend.jobqueue import tasks
 from backend.sql.duck import DuckDBMonitorMiddleware
@@ -71,6 +71,7 @@ class PatternMatchIdType(TypedDict):
 class Column(BaseModel):
     key: str
     dtype: DtypeType
+    etc: Dict[str, Any] = {}
     # icon_map: ClassVar[Dict[str,str]] = {
     #     'str': 'radix-icons:text',
     #     'category': 'material-symbols:category-outline',
@@ -97,16 +98,36 @@ class DatasourceSchema(BaseModel):
 
     @staticmethod
     def from_df(data_name:str, data_df:pd.DataFrame) -> 'DatasourceSchema':
-        columns = [
-            Column(key=col, dtype='float' if pd.api.types.is_numeric_dtype(data_df[col]) else 'str')
-            for col in data_df.columns
-        ]
+        print(f"DatasourceSchema.from_df({data_name=}, {data_df.dtypes=})")
+        #which_type = lambda col: str(data_df[col].dtype) if pd.api.types.is_numeric_dtype(data_df[col]) else ('category' if isinstance(data_df[col].dtype, pd.CategoricalDtype) else 'str')
+        def which_type(col, data_df=data_df) -> DtypeType:
+            if isinstance(data_df[col].dtype, pd.CategoricalDtype):
+                return 'category'
+            elif pd.api.types.is_integer_dtype(data_df[col]):
+                return 'int'
+            elif pd.api.types.is_float_dtype(data_df[col]):
+                return 'float'
+            elif pd.api.types.is_bool_dtype(data_df[col]):
+                return 'bool'
+            elif pd.api.types.is_datetime64_any_dtype(data_df[col]):
+                return 'datetime'
+            else:
+                return 'str'
+        def etc(col, dtype, data_df=data_df) -> Dict[str, Any]:
+            if dtype == 'category':
+                return {'choices': data_df[col].cat.categories.tolist()}
+            return {}
+        columns = [Column(key=col, dtype=which_type(col), etc=etc(col, which_type(col))) for col in data_df.columns]
+        print(f"  -> {columns=}")
         return DatasourceSchema(columns=columns, name=data_name)
     
     def get_column_dtype(self, key:str) -> DtypeType:
-        key = key.split('<<')[0]
-        column = next((col for col in self.columns if col.key == key), None)
+        column = self.get_column(key)
         return column.dtype if column else 'str'
+
+    def get_column(self, key:str) -> Optional[Column]:
+        key = key.split('<<')[0]
+        return next((col for col in self.columns if col.key == key), None)
 
 class PlotSettings(BaseModel):
     x_column: Optional[str] = None
@@ -197,7 +218,7 @@ class StringFilter(Filter):
     dtype: Literal['str'] = 'str'
     icon: ClassVar[str] = 'radix-icons:text'
     value: Optional[str] = None
-    operator: Optional[StringOperatorType] = 'contains'
+    operator: StringOperatorType = 'contains'
 
     @property
     def layout(self):
@@ -270,7 +291,7 @@ class StringFilter(Filter):
                             dmc.TextInput(
                                 id=id_val, #type: ignore
                                 value=self.value,
-                                placeholder="Filter value",
+                                placeholder="Filter value...",
                                 size="xs",
                                 flex=1,
                             ),
@@ -304,13 +325,115 @@ class StringFilter(Filter):
             case _: raise ValueError(f"Unknown operator: {self.operator}")
         return ~mask if self.negated else mask
 
+
+CategoryOperatorType = Literal['in']
+class CategoryFilter(Filter):
+    dtype: Literal['category'] = 'category'
+    icon: ClassVar[str] = 'material-symbols:category-outline'
+    value: List[str] = []
+    choices: List[str] = []
+    operator: CategoryOperatorType = 'in'
+
+    @property
+    def layout(self):
+        id_neg, _id_op, id_enab, id_val, id_del = self.dash_ids
+        return dmc.Card(
+            withBorder=True,
+            children=[
+                dmc.CardSection(children=[
+                    dmc.Group(
+                        wrap='nowrap',
+                        children=[
+                            DashIconify(icon=self.icon, width=20, height=20),
+                            dmc.Tooltip(
+                                children=dmc.Text(
+                                    children=self.column,
+                                    size="sm",
+                                    fw="bold",
+                                    truncate='end',
+                                    flex=1,
+                                    # make it look like a dmc.Code
+                                    c="var(--mantine-color-text)", #type: ignore
+                                    bg="var(--mantine-color-gray-1)", #type: ignore
+                                    ff="monospace",
+                                    px=1,
+                                    py=1,
+                                    style={"borderRadius": "4px", "border": "1px solid var(--mantine-color-gray-3)"}
+                                ),
+                                label=self.column,
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                                boxWrapperProps={'flex': '1'},
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.Switch(
+                                    id=id_neg, #type: ignore
+                                    offLabel=DashIconify(icon="mdi:equal", width=15,),
+                                    onLabel=DashIconify(icon="ic:baseline-not-equal", width=15,),
+                                    checked=self.negated
+                                ),
+                                label="Logical negation: EQUAL or NOT EQUAL",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.Checkbox(
+                                    id=id_enab, #type: ignore
+                                    checked=self.enabled,
+                                    size="xs",
+                                ),
+                                label="Enable/disable filter",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            )
+                        ]
+                    ),
+                    dmc.Group(
+                        wrap='nowrap',
+                        children=[
+                            dmc.TagsInput(
+                                placeholder="Select values...",
+                                id=id_val, #type:ignore
+                                data=self.choices,
+                                value=self.value,
+                                clearable=False,
+                                size="xs",
+                                flex=1,
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.ActionIcon(
+                                    DashIconify(icon='material-symbols:close', width=20, height=20),
+                                    id=id_del, #type: ignore
+                                    variant='transparent',
+                                    size='xs',
+                                ),
+                                label="Remove filter",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            )
+                        ]
+                    )
+                ])
+            ]
+        )
+
+    def mask(self, df:pd.DataFrame) -> pd.Series:
+        if any((self.value is None, self.enabled is False)): return pd.Series(True, index=df.index)
+        mask = df[self.column].isin(self.value)
+        return ~mask if self.negated else mask
+
+
 FilterUnionType = FilterUnion = Annotated[
-    Union[StringFilter,],
+    Union[StringFilter, CategoryFilter],
     Field(discriminator='dtype')
 ]
 FILTER_DTYPE_MAP = {
     'str': StringFilter,
-    # 'category': CategoryFilter,
+    'category': CategoryFilter,
     # 'int': IntFilter,
     # 'float': FloatFilter,
     # 'bool': BoolFilter,
@@ -919,15 +1042,18 @@ class Distro:
             field, dtype = global_filter_control['selected_filter_field'].split('<<')
             dtype = dtype[:-2] if dtype.endswith('>>') else dtype
             FilterType = FILTER_DTYPE_MAP[dtype] #pylint: disable=invalid-name
+            print(f"{field=}, {dtype=}, {FilterType=}")
             plot_settings.filters.append(FilterType(
                 column=field,
                 prefix=self._p(''),
-                index=global_filter_control['add_filter'] #n-clicks
+                index=global_filter_control['add_filter'], #n-clicks
+                **schema.get_column(field).etc #type: ignore
             ))
         # individual filter controls
         elif not isinstance(trig_id, str):
             trig_id = cast(Mapping[str, Any], trig_id)
             if trig_id.get('type') == 'filter':
+                # 1. obtain input dict of the filter who triggered this callback
                 # dash.callback_context.inputs_list is List[Union[Dict[str, Any], List[Dict[str, Any]]]]
                 # we need to flatten it in order to seek the input that triggered the callback
                 trig_input: Optional[Dict[str, Any]] = next(
@@ -938,6 +1064,7 @@ class Distro:
                     None
                 )
                 #print(f"{trig_input=}")
+                # 2. obtain corresponding pydantic model for that dict
                 corresponding_filter: Optional[FilterUnionType] = next(
                     (f for f in plot_settings.filters if all((
                         f.column == trig_id['column'],
@@ -1099,6 +1226,9 @@ class Distro:
         except Exception as e: #pylint: disable=broad-except
             #print(f"Exception in _update_graph: {e.__class__.__name__}: {e}")
             traceback_text = traceback.format_exc().replace('\n', '<br>')
+            print(f"An error has occurred.\n\n{e.__class__.__name__}: {e}\n\n{traceback.format_exc()}")
+            if isinstance(e, ValidationError):
+                print(f"  -> {plot_settings=}")
             err_text = "An error has occurred.<br><br>" + str(e.__class__.__name__) + ': ' + str(e).replace('\n', '<br>')
             err_text += '<br><br>' + traceback_text
             err_fig = error_figure(use_dark_mode, err_text)
@@ -1268,6 +1398,12 @@ class Distro:
         )(self._update_graph)
 
 
+def demo_iris_getter() -> Tuple[str, pd.DataFrame]:
+    df = DuckDBMonitorMiddleware.get_dataframe("SELECT * FROM iris;")
+    df['Species'] = df['Species'].astype('category')
+    return "iris", df
+
+
 distro_demo_with_dataset = Distro(
     id_prefix='distro-demo_set-',
     page_registry=cast(PageRegistryInput, dict(
@@ -1278,7 +1414,7 @@ distro_demo_with_dataset = Distro(
         tags=['meta', 'demo', 'reusable', 'distribution', 'scatter'],
         icon='flat-color-icons:scatter-plot',
     )),
-    datasource_getter=lambda: ("iris",   DuckDBMonitorMiddleware.get_dataframe("SELECT * FROM iris;"))
+    datasource_getter=demo_iris_getter
 )
 
 
