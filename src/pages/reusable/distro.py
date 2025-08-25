@@ -360,7 +360,7 @@ class Distro:
                     datasource_getter:Optional[Callable[  [], Tuple[str, pd.DataFrame]  ]] = None,
                 ):
         self._p = make_prefixer(id_prefix)
-        self._tab_values: List[str] = ['tab-plots', 'tab-filters', 'tab-overlays']
+        self._tab_values: List[str] = ['tab-plots', 'tab-filters', 'tab-overlays', 'tab-stats', 'tab-table']
         self._datasource_getter = datasource_getter
 
         dash.register_page(**(page_registry|{'layout': self.layout}))
@@ -454,7 +454,7 @@ class Distro:
 
                                 dmc.TabsTab(
                                     dmc.Group(
-                                            children = [
+                                        children = [
                                             DashIconify(
                                                 icon='fluent:arrow-trending-lines-20-regular',
                                                 width=20,
@@ -467,6 +467,42 @@ class Distro:
                                     px=2,
                                     bd="1px solid var(--mantine-color-default-border)",
                                     value="tab-overlays",
+                                ),
+
+
+                                dmc.TabsTab(
+                                    dmc.Group(
+                                        children=[
+                                            DashIconify(
+                                                icon='material-symbols-light:query-stats',
+                                                width=20,
+                                                height=20,
+                                            ),
+                                            dmc.Text("Statistics", fw=500) #type: ignore
+                                        ],
+                                        style={"writingMode": "vertical-rl", "textOrientation": "mixed", 'min-width': '30px'},
+                                    ),
+                                    px=2,
+                                    bd="1px solid var(--mantine-color-default-border)",
+                                    value="tab-stats",
+                                ),
+
+
+                                dmc.TabsTab(
+                                    dmc.Group(
+                                        children=[
+                                            DashIconify(
+                                                icon='ph:table-thin',
+                                                width=20,
+                                                height=20,
+                                            ),
+                                            dmc.Text("Table", fw=500) #type: ignore
+                                        ],
+                                        style={"writingMode": "vertical-rl", "textOrientation": "mixed", 'min-width': '30px'},
+                                    ),
+                                    px=2,
+                                    bd="1px solid var(--mantine-color-default-border)",
+                                    value="tab-table",
                                 )
                             ]
                         )],
@@ -688,6 +724,25 @@ class Distro:
         )
 
 
+    def _tab_content_statistics(self, schema:DatasourceSchema):
+        return dmc.Box(
+            id=dict(type=self._p('tab-content'), index=self._tab_values.index('tab-stats')),
+            children=[
+                make_tab_close_button(dict(type=self._p('close-tab'), index='tab-stats')),
+                dmc.Text("Statistics")
+            ]
+        )
+
+
+    def _tab_content_table(self, schema:DatasourceSchema):
+        return dmc.Box(
+            id=dict(type=self._p('tab-content'), index=self._tab_values.index('tab-table')),
+            children=[
+                make_tab_close_button(dict(type=self._p('close-tab'), index='tab-table')),
+                dmc.Text("Table")
+            ]
+        )
+
 
     # CALLBACK, triggered by page load or by modification of the DatasourceSchema
     #           sets initial contents of all dcc.Store's
@@ -734,6 +789,8 @@ class Distro:
             self._tab_content_plot_settings(schema),
             self._tab_content_filters(schema),
             self._tab_content_overlays(schema),
+            self._tab_content_statistics(schema),
+            self._tab_content_table(schema),
         ), not schema.has_data
     
 
@@ -750,7 +807,7 @@ class Distro:
     #           modifies collapsed-state of the tab aside as well as visibility of the various tab contents in it (via style {'display': 'none'})
     def _manage_tab_aside_content(self, active_tab, aside, tab_content_styles):
         #NOTE: tab_content_styles is indexed-alike to self._tab_values due to how we initialized the tab-content dmc.Box's id's in the layout
-        #print(f"_manage_tab_aside_content({active_tab=}, {aside=}, {tab_content_styles=})")
+        print(f"_manage_tab_aside_content({active_tab=}, {aside=}, {tab_content_styles=})")
         if tab_content_styles:
             for idx, tab_value in enumerate(self._tab_values):
                 tab_content_styles[idx] = set_visibility(tab_content_styles[idx] or {}, active_tab == tab_value)
