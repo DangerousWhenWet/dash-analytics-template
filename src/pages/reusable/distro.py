@@ -72,15 +72,7 @@ class Column(BaseModel):
     key: str
     dtype: DtypeType
     etc: Dict[str, Any] = {}
-    # icon_map: ClassVar[Dict[str,str]] = {
-    #     'str': 'radix-icons:text',
-    #     'category': 'material-symbols:category-outline',
-    #     'int': 'carbon:string-integer',
-    #     'float': 'lsicon:decimal-filled',
-    #     'bool': 'ix:data-type-boolean',
-    #     'date': 'fluent-mdl2:event-date',
-    #     'datetime': 'fluent-mdl2:date-time',
-    # }
+
 
     @property
     def dtyped_key(self) -> str:
@@ -426,15 +418,135 @@ class CategoryFilter(Filter):
         mask = df[self.column].isin(self.value)
         return ~mask if self.negated else mask
 
+NumericOperatorType = Literal['equal', 'greater', 'greater-equal', 'less', 'less-equal']
+class IntFilter(Filter):
+    dtype: Literal['int'] = 'int'
+    icon: ClassVar[str] = "carbon:string-integer"
+    value: Optional[int] = None
+    operator: NumericOperatorType = 'equal'
 
+    @property
+    def layout(self):
+        id_neg, id_op, id_enab, id_val, id_del = self.dash_ids
+        return dmc.Card(
+            withBorder=True,
+            children=[
+                dmc.CardSection(children=[
+                    dmc.Group(
+                        wrap='nowrap',
+                        children=[
+                            DashIconify(icon=self.icon, width=20, height=20),
+                            dmc.Tooltip(
+                                children=dmc.Text(
+                                    children=self.column,
+                                    size="sm",
+                                    fw="bold",
+                                    truncate='end',
+                                    flex=1,
+                                    # make it look like a dmc.Code
+                                    c="var(--mantine-color-text)", #type: ignore
+                                    bg="var(--mantine-color-gray-1)", #type: ignore
+                                    ff="monospace",
+                                    px=1,
+                                    py=1,
+                                    style={"borderRadius": "4px", "border": "1px solid var(--mantine-color-gray-3)"}
+                                ),
+                                label=self.column,
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                                boxWrapperProps={'flex': '1'},
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.Switch(
+                                    id=id_neg, #type: ignore
+                                    offLabel=DashIconify(icon="mdi:equal", width=15,),
+                                    onLabel=DashIconify(icon="ic:baseline-not-equal", width=15,),
+                                    checked=self.negated
+                                ),
+                                label="Logical negation: EQUAL or NOT EQUAL",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            ),
+                            dmc.Select(
+                                id=id_op, #type: ignore
+                                data=get_args(NumericOperatorType),
+                                value=self.operator,
+                                clearable=False,
+                                size="xs",
+                                w='33%',
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.Checkbox(
+                                    id=id_enab, #type: ignore
+                                    checked=self.enabled,
+                                    size="xs",
+                                ),
+                                label="Enable/disable filter",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            )
+                        ]
+                    ),
+                    dmc.Group(
+                        wrap='nowrap',
+                        children=[
+                            dmc.NumberInput(
+                                id=id_val, #type:ignore
+                                placeholder="Filter value...",
+                                variant='default',
+                                size='xs',
+                                hideControls=True,
+                                flex=1
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.ActionIcon(
+                                    DashIconify(icon='material-symbols:close', width=20, height=20),
+                                    id=id_del, #type: ignore
+                                    variant='transparent',
+                                    size='xs',
+                                ),
+                                label="Remove filter",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            )
+                        ]
+                    )
+                ])
+            ]
+        )
+
+    def mask(self, df:pd.DataFrame) -> pd.Series:
+        if any((self.value is None, self.value=='', self.enabled is False)): return pd.Series(True, index=df.index)
+        match self.operator:
+            case 'equal':           mask = df[self.column] == self.value
+            case 'greater':         mask = df[self.column] > self.value
+            case 'less':            mask = df[self.column] < self.value
+            case 'greater-equal':   mask = df[self.column] >= self.value
+            case 'less-equal':      mask = df[self.column] <= self.value
+            case _: raise ValueError(f"Unknown operator: {self.operator}")
+        return ~mask if self.negated else mask
+
+    # icon_map: ClassVar[Dict[str,str]] = {
+    #     'str': 'radix-icons:text',
+    #     'category': 'material-symbols:category-outline',
+    #     'int': 'carbon:string-integer',
+    #     'float': 'lsicon:decimal-filled',
+    #     'bool': 'ix:data-type-boolean',
+    #     'date': 'fluent-mdl2:event-date',
+    #     'datetime': 'fluent-mdl2:date-time',
+    # }
 FilterUnionType = FilterUnion = Annotated[
-    Union[StringFilter, CategoryFilter],
+    Union[StringFilter, CategoryFilter, IntFilter],
     Field(discriminator='dtype')
 ]
 FILTER_DTYPE_MAP = {
     'str': StringFilter,
     'category': CategoryFilter,
-    # 'int': IntFilter,
+    'int': IntFilter,
     # 'float': FloatFilter,
     # 'bool': BoolFilter,
     # 'date': DateFilter,
@@ -1401,6 +1513,7 @@ class Distro:
 def demo_iris_getter() -> Tuple[str, pd.DataFrame]:
     df = DuckDBMonitorMiddleware.get_dataframe("SELECT * FROM iris;")
     df['Species'] = df['Species'].astype('category')
+    df['Petal.Width'] = df['Petal.Width'].astype('int')
     return "iris", df
 
 
