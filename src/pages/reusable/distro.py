@@ -1,9 +1,9 @@
-#pylint: disable=missing-docstring, trailing-whitespace, line-too-long
+#pylint: disable=missing-docstring, trailing-whitespace, line-too-long, multiple-statements, use-dict-literal
 import datetime as dt
 import functools
 import itertools
 import traceback
-from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict, Generic, Iterable, TypeVar
+from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict, Generic, Iterable, TypeVar, Type
 
 import dash
 from dash import dcc, html, Input, Output, State
@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from backend.jobqueue import tasks
 from backend.sql.duck import DuckDBMonitorMiddleware
-from pages.utils.etc import make_prefixer, interleave_with_dividers
+from pages.utils.etc import make_prefixer
 from pages.utils.extended_page_registry import PageRegistryInput
 
 
@@ -190,6 +190,9 @@ class Filter(BaseModel):
             dict(type='filter', prefix=self.prefix, column=self.column, index=self.index, component='remove'),
         ) #type: ignore
 
+    def cast(self, x: Any) -> Optional[Any]:
+        return x
+
     def mutate(self, callback_input:Dict[str, Any]):
         component = callback_input['id']['component']
         value = callback_input['value']
@@ -200,7 +203,7 @@ class Filter(BaseModel):
         elif component == 'enable':
             self.enabled = value
         elif component == 'value':
-            self.value = value
+            self.value = self.cast(value)
         elif component == 'remove':
             self._flag_for_removal = True
 
@@ -211,6 +214,12 @@ class StringFilter(Filter):
     icon: ClassVar[str] = 'radix-icons:text'
     value: Optional[str] = None
     operator: StringOperatorType = 'contains'
+
+    def cast(self, x: Any) -> Optional[str]:
+        try:
+            return str(x)
+        except:
+            return None
 
     @property
     def layout(self):
@@ -251,7 +260,7 @@ class StringFilter(Filter):
                                     onLabel=DashIconify(icon="ic:baseline-not-equal", width=15,),
                                     checked=self.negated
                                 ),
-                                label="Logical negation: EQUAL or NOT EQUAL",
+                                label='Logical negation: "IS" or "IS NOT"',
                                 position='top',
                                 radius='xs',
                                 withArrow=True,
@@ -326,6 +335,12 @@ class CategoryFilter(Filter):
     choices: List[str] = []
     operator: CategoryOperatorType = 'in'
 
+    def cast(self, x: Any) -> Optional[str]:
+        try:
+            return str(x)
+        except:
+            return None
+
     @property
     def layout(self):
         id_neg, _id_op, id_enab, id_val, id_del = self.dash_ids
@@ -365,7 +380,7 @@ class CategoryFilter(Filter):
                                     onLabel=DashIconify(icon="ic:baseline-not-equal", width=15,),
                                     checked=self.negated
                                 ),
-                                label="Logical negation: EQUAL or NOT EQUAL",
+                                label='Logical negation: "IS" or "IS NOT"',
                                 position='top',
                                 radius='xs',
                                 withArrow=True,
@@ -419,11 +434,15 @@ class CategoryFilter(Filter):
         return ~mask if self.negated else mask
 
 NumericOperatorType = Literal['equal', 'greater', 'greater-equal', 'less', 'less-equal']
-class IntFilter(Filter):
-    dtype: Literal['int'] = 'int'
+class _NumericFilter(Filter):
+    dtype: Any = None
     icon: ClassVar[str] = "carbon:string-integer"
-    value: Optional[int] = None
+    value: Optional[Any] = None
     operator: NumericOperatorType = 'equal'
+    allowDecimal: ClassVar[bool] = False
+
+    def cast(self, x: Any) -> Optional[Any]:
+        raise NotImplementedError("abstract method")
 
     @property
     def layout(self):
@@ -464,7 +483,7 @@ class IntFilter(Filter):
                                     onLabel=DashIconify(icon="ic:baseline-not-equal", width=15,),
                                     checked=self.negated
                                 ),
-                                label="Logical negation: EQUAL or NOT EQUAL",
+                                label='Logical negation: "IS" or "IS NOT"',
                                 position='top',
                                 radius='xs',
                                 withArrow=True,
@@ -499,6 +518,7 @@ class IntFilter(Filter):
                                 variant='default',
                                 size='xs',
                                 hideControls=True,
+                                allowDecimal=self.allowDecimal,
                                 flex=1
                             ),
                             dmc.Tooltip(
@@ -530,6 +550,33 @@ class IntFilter(Filter):
             case _: raise ValueError(f"Unknown operator: {self.operator}")
         return ~mask if self.negated else mask
 
+
+class IntFilter(_NumericFilter):
+    dtype: Literal['int'] = 'int'
+    value: Optional[int] = None
+    icon: ClassVar[str] = "carbon:string-integer"
+    allowDecimal: ClassVar[bool] = False
+
+    def cast(self, x: Any) -> Optional[int]:
+        try:
+            return int(x)
+        except ValueError:
+            return None
+
+
+class FloatFilter(_NumericFilter):
+    dtype: Literal['float'] = 'float'
+    value: Optional[float] = None
+    icon: ClassVar[str] = "lsicon:decimal-filled"
+    allowDecimal: ClassVar[bool] = True
+    
+
+    def cast(self, x: Any) -> Optional[float]:
+        try:
+            return float(x)
+        except ValueError:
+            return None
+
     # icon_map: ClassVar[Dict[str,str]] = {
     #     'str': 'radix-icons:text',
     #     'category': 'material-symbols:category-outline',
@@ -540,14 +587,14 @@ class IntFilter(Filter):
     #     'datetime': 'fluent-mdl2:date-time',
     # }
 FilterUnionType = FilterUnion = Annotated[
-    Union[StringFilter, CategoryFilter, IntFilter],
+    Union[StringFilter, CategoryFilter, IntFilter, FloatFilter],
     Field(discriminator='dtype')
 ]
 FILTER_DTYPE_MAP = {
     'str': StringFilter,
     'category': CategoryFilter,
     'int': IntFilter,
-    # 'float': FloatFilter,
+    'float': FloatFilter,
     # 'bool': BoolFilter,
     # 'date': DateFilter,
     # 'datetime': DateTimeFilter
@@ -949,7 +996,7 @@ class Distro:
         )
 
 
-    def _tab_content_overlays(self, schema:DatasourceSchema):
+    def _tab_content_overlays(self, schema:DatasourceSchema): #pylint: disable=unused-argument
         return dmc.Box(
             id=dict(type=self._p('tab-content'), index=self._tab_values.index('tab-overlays')),
             children=[
@@ -959,7 +1006,7 @@ class Distro:
         )
 
 
-    def _tab_content_statistics(self, schema:DatasourceSchema):
+    def _tab_content_statistics(self, schema:DatasourceSchema): #pylint: disable=unused-argument
         return dmc.Box(
             id=dict(type=self._p('tab-content'), index=self._tab_values.index('tab-stats')),
             children=[
@@ -969,7 +1016,7 @@ class Distro:
         )
 
 
-    def _tab_content_table(self, schema:DatasourceSchema):
+    def _tab_content_table(self, schema:DatasourceSchema): #pylint: disable=unused-argument
         return dmc.Box(
             id=dict(type=self._p('tab-content'), index=self._tab_values.index('tab-table')),
             children=[
@@ -1079,7 +1126,7 @@ class Distro:
 
     # CALLBACK, triggered by either of discrete/continuous color scale "preview" button
     #           populates the color scale preview graph and opens the modal for viewing
-    def _color_scale_preview(self, nclicks, colorize_column, schema, use_dark_mode):
+    def _color_scale_preview(self, nclicks, colorize_column, schema, use_dark_mode): #pylint: disable=unused-argument
         #print(f"_color_scale_preview({nclicks=}, {colorize_column=}, {schema=})")
         schema = DatasourceSchema(**schema) if schema is not None else DatasourceSchema(columns=[], name="No data")
         if colorize_column is None:
@@ -1107,10 +1154,10 @@ class Distro:
                 dimensionality,
                 colorization,
                 global_filter_control,
-                individual_filter_controls,
+                individual_filter_controls, #pylint: disable=unused-argument
                 plot_settings,
                 schema,
-                dimensionality_controls
+                dimensionality_controls #pylint: disable=unused-argument
             ):
         # print('='*80)
         # print(f"_plot_settings_changed({columns=}, {dimensionality=}, {global_filter_control=}, {individual_filter_controls=}, {plot_settings=}, {schema=}, {dimensionality_controls=})")
@@ -1153,8 +1200,8 @@ class Distro:
         if trig_id == self._p('add-filter') and global_filter_control['selected_filter_field'] is not None:
             field, dtype = global_filter_control['selected_filter_field'].split('<<')
             dtype = dtype[:-2] if dtype.endswith('>>') else dtype
-            FilterType = FILTER_DTYPE_MAP[dtype] #pylint: disable=invalid-name
-            print(f"{field=}, {dtype=}, {FilterType=}")
+            FilterType: Type[FilterUnionType] = FILTER_DTYPE_MAP[dtype] #pylint: disable=invalid-name
+            #print(f"{field=}, {dtype=}, {FilterType=}")
             plot_settings.filters.append(FilterType(
                 column=field,
                 prefix=self._p(''),
@@ -1224,15 +1271,12 @@ class Distro:
             color_column = plot_settings.color_column
             if color_column: color_column = color_column.split('<<')[0]
             ser_color_group = pd.Series('all', index=df.index).astype('category')
-            ser_color_value = pd.Series(np.nan, index=df.index).astype('float')
             if color_column and plot_settings.color_enabled:
                 color_column = color_column.split('<<')[0]
                 if plot_settings.color_column_type == 'discrete':
                     # for discrete types, the value itself is a group identifier -- override the pseudo-group
                     ser_color_group = df[color_column].astype('category')
-                else:
-                    # for continuous types, there is only the 1 "all" pseudo-group, but we can use the color-column as the value for color scaling
-                    ser_color_value = df[color_column] if color_column else pd.Series(dtype='float')
+                # for continuous types, there is only the 1 "all" pseudo-group, but we will use the color-column as the value for color scaling
 
 
             # ===== Filters =====
