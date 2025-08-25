@@ -65,6 +65,8 @@ class DatasourceSchema(BaseModel):
 class PlotSettings(BaseModel):
     x_column: Optional[str] = None
     y_column: Optional[str] = None
+    z_column: Optional[str] = None
+    dimensionality: Literal['2d', '3d'] = '2d'
     filters: List["FilterUnionType"] = []
 
 
@@ -422,17 +424,17 @@ class Distro:
                 dmc.ScrollArea([
                     dmc.Center(dmc.SegmentedControl(
                         id=self._p('dimensionality'),
-                        value='2D',
+                        value='2d',
                         data=[
                             {
-                                "value": '2D',
+                                "value": '2d',
                                 "label": dmc.Center(
                                     [DashIconify(icon='gis:coord-system', width=16), html.Span('2D')],
                                     style={"gap": 10},
                                 ),
                             },
                             {
-                                "value": '3D',
+                                "value": '3d',
                                 "label": dmc.Center(
                                     [DashIconify(icon='gis:coord-system-3d', width=16), html.Span('3D')],
                                     style={"gap": 10},
@@ -455,6 +457,26 @@ class Distro:
                         id=self._p('y-column-select'),
                         data=col_dtyped_keys, #type:ignore
                         value=col_dtyped_keys[1]['value'] if len(col_dtyped_keys) > 1 else None,
+                        clearable=False,
+                        renderOption={'function': "renderSelectOptionDtypeRight"},
+                    ),
+                    dmc.Select(
+                        leftSection=DashIconify(icon='emojione-monotone:letter-z', width=20,height=20),
+                        leftSectionPointerEvents='none',
+                        id=self._p('z-column-select'),
+                        data=col_dtyped_keys, #type:ignore
+                        value=col_dtyped_keys[2]['value'] if len(col_dtyped_keys) > 1 else None,
+                        clearable=False,
+                        renderOption={'function': "renderSelectOptionDtypeRight"},
+                    ),
+                    dmc.Divider(my=4),
+                    dmc.Select(
+                        label="Colorize on:",
+                        leftSection=DashIconify(icon='ic:outline-palette', width=20,height=20),
+                        leftSectionPointerEvents='none',
+                        id=self._p('color-column-select'),
+                        data=col_dtyped_keys, #type:ignore
+                        value=col_dtyped_keys[0]['value'] if len(col_dtyped_keys) > 1 else None,
                         clearable=False,
                         renderOption={'function': "renderSelectOptionDtypeRight"},
                     )
@@ -590,21 +612,46 @@ class Distro:
         return None if any(any_actionicon_nclicks) else dash.no_update
     
 
+
+
+
     #CALLBACK, triggered by interaction with anything in the Plot Settings tab
-    #          mutates the plot-settings Store
-    def _plot_settings_changed(self, columns, global_filter_control, individual_filter_controls, plot_settings, schema):
+    #          mutates the plot-settings Store and mutates visibility of 2D-/3D-specific controls
+    def _plot_settings_changed(
+                self,
+                columns,
+                dimensionality,
+                global_filter_control,
+                individual_filter_controls,
+                plot_settings,
+                schema,
+                dimensionality_controls
+            ):
         print('='*80)
-        # print(f"_plot_settings_changed({columns=}, {global_filter_control=}, {individual_filter_controls=}, {plot_settings=})")
-        #print(f"{dash.callback_context.triggered=}")
-        print(f"{dash.callback_context.triggered_id=}")
-        print(f"{type(dash.callback_context.triggered_id)=}")
-        print(f"{dash.callback_context.inputs_list=}")
-        print(f"{individual_filter_controls=}")
+        print(f"_plot_settings_changed({columns=}, {dimensionality=}, {global_filter_control=}, {individual_filter_controls=}, {plot_settings=}, {schema=}, {dimensionality_controls=})")
+        # print(f"{dash.callback_context.triggered=}")
+        # print(f"{dash.callback_context.triggered_id=}")
+        # print(f"{type(dash.callback_context.triggered_id)=}")
+        #print(f"{dash.callback_context.inputs_list=}")
+        #print(f"{dash.callback_context.states_list=}")
+        print(f"{dash.callback_context.states=}")
+        # print(f"{individual_filter_controls=}")
         
         trig_id = dash.callback_context.triggered_id
         plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
 
         # ===== "Plot Settings" tab ======
+        plot_settings.dimensionality = dimensionality
+        # modify visibility; set {display: none} or {display: block} as necessary
+        ids_visible_only_3d = [self._p(x)+'.style' for x in ['z-column-select',]]
+        #print(f"{ids_visible_only_3d=}")
+        def visibility_criteria(k): return (True) if dimensionality == '3d' else (k not in ids_visible_only_3d) #pylint: disable=multiple-statements
+        dimensionality_styles = {
+            k: set_visibility(v or {}, visibility_criteria(k))
+                for k,v in dash.callback_context.states.items()
+                if k.endswith('.style')
+        }
+        #print(f"{dimensionality_styles=}")
         plot_settings.x_column = columns['x'].split('<<')[0] if columns['x'] else None
         plot_settings.y_column = columns['y'].split('<<')[0] if columns['y'] else None
 
@@ -632,7 +679,7 @@ class Distro:
                     ) if x['id'] == trig_id),
                     None
                 )
-                print(f"{trig_input=}")
+                #print(f"{trig_input=}")
                 corresponding_filter: Optional[FilterUnionType] = next(
                     (f for f in plot_settings.filters if all((
                         f.column == trig_id['column'],
@@ -640,16 +687,19 @@ class Distro:
                     ))),
                     None
                 )
-                print(f"{corresponding_filter=}")
+                #print(f"{corresponding_filter=}")
                 if trig_input is not None and corresponding_filter is not None:
                     corresponding_filter.mutate(trig_input)
                     for f in plot_settings.filters:
-                        if f._flag_for_removal:
+                        if f._flag_for_removal: #pylint: disable=protected-access
                             print(f"DESTROYING {f=}")
                             plot_settings.filters.remove(f)
 
 
-        return plot_settings.model_dump()
+        return {
+            'plot_settings': plot_settings.model_dump(),
+            'dimensionality_controls': list(dimensionality_styles.values()),
+        }
 
 
     #CALLBACK, interaction with any of PlotSettings, ..., or the theme switcher
@@ -789,9 +839,17 @@ class Distro:
 
 
         dash.callback(
-            Output(self._p('plot-settings'), 'data', allow_duplicate=True),
+            output = {
+                'plot_settings': Output(self._p('plot-settings'), 'data', allow_duplicate=True),
+                'dimensionality_controls': [
+                    Output(self._p('x-column-select'), 'style'),
+                    Output(self._p('y-column-select'), 'style'),
+                    Output(self._p('z-column-select'), 'style'),
+                ]
+            },
             inputs={
                 'columns': dict(x=Input(self._p('x-column-select'), 'value'), y=Input(self._p('y-column-select'), 'value')),
+                'dimensionality': Input(self._p('dimensionality'), 'value'),
                 'global_filter_control': {
                     'selected_filter_field': Input(self._p('select-filter-field'), 'value'),
                     'add_filter': Input(self._p('add-filter'), 'n_clicks'),
@@ -808,6 +866,11 @@ class Distro:
             state=dict(
                 plot_settings=State(self._p('plot-settings'), 'data'),
                 schema=State(self._p('datasource-schema'), 'data'),
+                dimensionality_controls=[
+                    State(self._p('x-column-select'), 'style'),
+                    State(self._p('y-column-select'), 'style'),
+                    State(self._p('z-column-select'), 'style'),
+                ]
             ),
 
             prevent_initial_call=True
