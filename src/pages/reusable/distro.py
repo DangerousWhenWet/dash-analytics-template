@@ -3,14 +3,15 @@ import datetime as dt
 import functools
 import itertools
 import traceback
-from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict
+from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict, Generic, Iterable, TypeVar
 
 import dash
 from dash import dcc, html, Input, Output, State
 from dash_iconify import DashIconify
 import dash_mantine_components as dmc
+import numpy as np
 import pandas as pd
-from plotly.colors import qualitative as qualitative_color_scales
+from plotly.colors import qualitative as qualitative_color_scales, sequential as continuous_color_scales
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field
@@ -21,6 +22,46 @@ from pages.utils.etc import make_prefixer, interleave_with_dividers
 from pages.utils.extended_page_registry import PageRegistryInput
 
 
+DtypeType = Literal['str', 'category', 'int', 'float', 'bool', 'date', 'datetime']
+DiscreteColorScale = Literal[
+    'Plotly', 'D3', 'G10', 'T10', 'Alphabet',
+    'Dark24', 'Light24', 'Set1', 'Pastel1', 'Dark2',
+    'Set2', 'Pastel2', 'Set3', 'Antique', 'Bold',
+    'Pastel', 'Prism', 'Safe', 'Vivid'
+]
+ContinuousColorScale = Literal[
+    'Plotly3', 'Viridis', 'Cividis', 'Inferno', 'Magma', 'Plasma', 'Turbo',
+    'Blackbody', 'Bluered', 'Electric', 'Hot', 'Jet', 'Rainbow', 'Blues',
+    'BuGn', 'BuPu', 'GnBu', 'Greens', 'Greys', 'OrRd', 'Oranges',
+    'PuBu', 'PuBuGn', 'PuRd', 'Purples', 'RdBu', 'RdPu', 'Reds', 'YlGn',
+    'YlGnBu', 'YlOrBr', 'turbid', 'thermal', 'haline', 'solar', 'ice',
+    'gray', 'deep', 'dense', 'algae', 'matter', 'speed', 'amp', 'tempo',
+    'Burg', 'Burgyl', 'Redor', 'Oryel', 'Peach', 'Pinkyl', 'Mint', 'Blugrn',
+    'Darkmint', 'Emrld', 'Aggrnyl', 'Bluyl', 'Teal', 'Tealgrn', 'Purp',
+    'Purpor', 'Sunset', 'Magenta', 'Sunsetdark', 'Agsunset', 'Brwnyl'
+]
+AnyColorScale = Union[DiscreteColorScale, ContinuousColorScale]
+colorscale_map: Dict[str, List[str]] = \
+    {k: getattr(qualitative_color_scales, k) for k in get_args(DiscreteColorScale)} | \
+    {k: getattr(continuous_color_scales, k) for k in get_args(ContinuousColorScale)}
+
+
+X = TypeVar('X')
+class SubscriptableCycle(Generic[X]):
+    '''a cycle that can be subscripted to get elements at arbitrary position within the cycle wrapping around "toroidally"'''
+    def __init__(self, iterable: Iterable[X]):
+        self.iterable: List[X] = list(iterable)
+    
+    def __getitem__(self, key) -> X:
+        return self.iterable[key % len(self)]
+    
+    def __len__(self) -> int:
+        return len(self.iterable)
+    
+    def __iter__(self) -> Iterable[X]:
+        return itertools.cycle(self.iterable)
+
+
 class PatternMatchIdType(TypedDict):
     prefix: str
     column: str
@@ -29,7 +70,7 @@ class PatternMatchIdType(TypedDict):
 
 class Column(BaseModel):
     key: str
-    dtype: Literal['str', 'category', 'int', 'float', 'bool', 'date', 'datetime']
+    dtype: DtypeType
     # icon_map: ClassVar[Dict[str,str]] = {
     #     'str': 'radix-icons:text',
     #     'category': 'material-symbols:category-outline',
@@ -61,13 +102,42 @@ class DatasourceSchema(BaseModel):
             for col in data_df.columns
         ]
         return DatasourceSchema(columns=columns, name=data_name)
+    
+    def get_column_dtype(self, key:str) -> DtypeType:
+        key = key.split('<<')[0]
+        column = next((col for col in self.columns if col.key == key), None)
+        return column.dtype if column else 'str'
 
 class PlotSettings(BaseModel):
     x_column: Optional[str] = None
     y_column: Optional[str] = None
     z_column: Optional[str] = None
     dimensionality: Literal['2d', '3d'] = '2d'
+    color_enabled: bool = False
+    color_column: Optional[str] = None
+    color_column_type: Optional[Literal['discrete', 'continuous']] = 'discrete'
+    color_scale_name_discrete: Optional[DiscreteColorScale] = 'T10'
+    color_scale_name_continuous: Optional[ContinuousColorScale] = 'thermal'
     filters: List["FilterUnionType"] = []
+
+    @property
+    def color_scale_name(self) -> Optional[str]:
+        if self.color_column_type == 'discrete':
+            return self.color_scale_name_discrete
+        elif self.color_column_type == 'continuous':
+            return self.color_scale_name_continuous
+        return self.color_scale_name_discrete
+    
+    @color_scale_name.setter
+    def color_scale_name(self, value: Optional[str]):
+        if self.color_column_type == 'discrete':
+            self.color_scale_name_discrete = cast(DiscreteColorScale, value)
+        elif self.color_column_type == 'continuous':
+            self.color_scale_name_continuous = cast(ContinuousColorScale, value)
+
+    def get_color_scale(self, name:Optional[str]=None) -> Optional[SubscriptableCycle[str]]:
+        name = name or self.color_scale_name
+        return SubscriptableCycle(colorscale_map[name]) if name else None
 
 
 class FilterPatternMatchIdType(PatternMatchIdType):
@@ -268,9 +338,9 @@ def make_tab_close_button(tab_id:Dict[str, Any]):
     )
 
 
-def set_visibility(style_dict:Dict[str, Any], visible:bool):
+def set_visibility(style_dict:Dict[str, Any], visible:bool, visible_style:str='block') -> Dict[str, Any]:
     if visible:
-        style_dict['display'] = 'block'
+        style_dict['display'] = visible_style
     else:
         style_dict['display'] = 'none'
     return style_dict
@@ -442,43 +512,129 @@ class Distro:
                             }
                         ],#type: ignore
                     )),
-                    dmc.Select(
-                        leftSection=DashIconify(icon='emojione-monotone:letter-x', width=20,height=20),
-                        leftSectionPointerEvents='none',
-                        id=self._p('x-column-select'),
-                        data=col_dtyped_keys, #type:ignore
-                        value=col_dtyped_keys[0]['value'] if len(col_dtyped_keys) > 1 else None,
-                        clearable=False,
-                        renderOption={'function': "renderSelectOptionDtypeRight"},
+                    dmc.Fieldset(
+                        legend=dmc.Text('Axes:', fw=700), #type:ignore
+                        variant='filled',
+                        radius='xs',
+                        children=[
+                            dmc.Select(
+                                leftSection=DashIconify(icon='emojione-monotone:letter-x', width=20,height=20),
+                                leftSectionPointerEvents='none',
+                                id=self._p('x-column-select'),
+                                data=col_dtyped_keys, #type:ignore
+                                value=col_dtyped_keys[0]['value'] if len(col_dtyped_keys) > 1 else None,
+                                clearable=False,
+                                renderOption={'function': "renderSelectOptionDtypeRight"},
+                            ),
+                            dmc.Select(
+                                leftSection=DashIconify(icon='emojione-monotone:letter-y', width=20,height=20),
+                                leftSectionPointerEvents='none',
+                                id=self._p('y-column-select'),
+                                data=col_dtyped_keys, #type:ignore
+                                value=col_dtyped_keys[1]['value'] if len(col_dtyped_keys) > 1 else None,
+                                clearable=False,
+                                renderOption={'function': "renderSelectOptionDtypeRight"},
+                            ),
+                            dmc.Select(
+                                leftSection=DashIconify(icon='emojione-monotone:letter-z', width=20,height=20),
+                                leftSectionPointerEvents='none',
+                                id=self._p('z-column-select'),
+                                data=col_dtyped_keys, #type:ignore
+                                value=col_dtyped_keys[2]['value'] if len(col_dtyped_keys) > 1 else None,
+                                clearable=False,
+                                renderOption={'function': "renderSelectOptionDtypeRight"},
+                            ),
+                        ]
                     ),
-                    dmc.Select(
-                        leftSection=DashIconify(icon='emojione-monotone:letter-y', width=20,height=20),
-                        leftSectionPointerEvents='none',
-                        id=self._p('y-column-select'),
-                        data=col_dtyped_keys, #type:ignore
-                        value=col_dtyped_keys[1]['value'] if len(col_dtyped_keys) > 1 else None,
-                        clearable=False,
-                        renderOption={'function': "renderSelectOptionDtypeRight"},
-                    ),
-                    dmc.Select(
-                        leftSection=DashIconify(icon='emojione-monotone:letter-z', width=20,height=20),
-                        leftSectionPointerEvents='none',
-                        id=self._p('z-column-select'),
-                        data=col_dtyped_keys, #type:ignore
-                        value=col_dtyped_keys[2]['value'] if len(col_dtyped_keys) > 1 else None,
-                        clearable=False,
-                        renderOption={'function': "renderSelectOptionDtypeRight"},
-                    ),
-                    dmc.Divider(my=4),
-                    dmc.Select(
-                        label="Colorize on:",
-                        leftSection=DashIconify(icon='ic:outline-palette', width=20,height=20),
-                        leftSectionPointerEvents='none',
-                        id=self._p('color-column-select'),
-                        data=col_dtyped_keys, #type:ignore
-                        value=col_dtyped_keys[0]['value'] if len(col_dtyped_keys) > 1 else None,
-                        clearable=False,
-                        renderOption={'function': "renderSelectOptionDtypeRight"},
+                    dmc.Fieldset(
+                        legend=dmc.Text('Colorization:', fw=700), #type:ignore
+                        variant='filled',
+                        radius='xs',
+                        children=[
+                            dmc.Group(
+                                align='center',
+                                children=[
+                                    dmc.Select(
+                                        placeholder="Pick a column...",
+                                        leftSection=DashIconify(icon='ic:outline-palette', width=20,height=20),
+                                        leftSectionPointerEvents='none',
+                                        id=self._p('color-column-select'),
+                                        data=col_dtyped_keys, #type:ignore
+                                        value=None,
+                                        clearable=False,
+                                        renderOption={'function': "renderSelectOptionDtypeRight"},
+                                        flex=1,
+                                    ),
+                                    dmc.Switch(
+                                        id=self._p('color-enabled'),
+                                        onLabel='ON', offLabel='OFF',
+                                        size='sm',
+                                    ),
+                                ]
+                            ),
+                            dmc.Group(
+                                id=self._p('color-scale-discrete-group'),
+                                align='end', justify='space-between',
+                                wrap='nowrap',
+                                children=[
+                                    dmc.Select(
+                                        label=dmc.Text("Discrete Color Scale:", size='xs', fw=700),#type:ignore
+                                        id=self._p('color-scale-discrete-select'),
+                                        data=get_args(DiscreteColorScale),
+                                        value='T10',
+                                        clearable=False,
+                                        flex=1
+                                    ),
+                                    dmc.Tooltip(
+                                        children=[
+                                            dmc.ActionIcon(
+                                                DashIconify(icon='material-symbols-light:preview-sharp', width=20, height=20),
+                                                id=self._p('color-scale-discrete-preview'),
+                                                size='sm',
+                                            )
+                                        ],
+                                        position='bottom',
+                                        withArrow=True,
+                                        label='Preview colorscales',
+                                    )
+                                ]
+                            ),
+                            dmc.Group(
+                                id=self._p('color-scale-continuous-group'),
+                                align='end', justify='space-between',
+                                wrap='nowrap',
+                                children=[
+                                    dmc.Select(
+                                        label=dmc.Text("Continuous Color Scale:", size='xs', fw=700),#type:ignore
+                                        id=self._p('color-scale-continuous-select'),
+                                        data=get_args(ContinuousColorScale),
+                                        value='thermal',
+                                        clearable=False,
+                                        flex=1
+                                    ),
+                                    dmc.Tooltip(
+                                        children=[
+                                            dmc.ActionIcon(
+                                                DashIconify(icon='material-symbols-light:preview-sharp', width=20, height=20),
+                                                id=self._p('color-scale-continuous-preview'),
+                                                size='sm',
+                                            )
+                                        ],
+                                        position='bottom',
+                                        withArrow=True,
+                                        label='Preview colorscales',
+                                    )
+                                ]
+                            ),
+                            dmc.Modal(
+                                id=self._p('color-scale-preview-modal'),
+                                title="??? Color Scale Preview",
+                                size='xl',
+                                children=[
+                                    dcc.Graph(id=self._p('color-scale-preview-graph')),
+                                ]
+                            )
+                        ],
                     )
                 ])
             ]
@@ -586,7 +742,7 @@ class Distro:
     def _populate_filters(self, plot_settings):
         plot_settings = PlotSettings(**plot_settings) if plot_settings is not None else PlotSettings()
         #print(f"_populate_filters({plot_settings=})") #<-- plot_settings.filters now contains only base Filter objects
-        return interleave_with_dividers([f.layout for f in plot_settings.filters])
+        return [f.layout for f in plot_settings.filters]
         
 
 
@@ -612,6 +768,42 @@ class Distro:
         return None if any(any_actionicon_nclicks) else dash.no_update
     
 
+    # CALLBACK, triggered by changing the colorize column select
+    #           manages visibility of either discrete/continuous color scale selects
+    def _colorize_column_changed(self, colorize_column, schema):
+        #print(f"_colorize_column_changed({colorize_column=}, {schema=})")
+        schema = DatasourceSchema(**schema) if schema is not None else DatasourceSchema(columns=[], name="No data")
+        if colorize_column is None:
+            return dict(
+                color_scale_discrete=set_visibility({}, False, visible_style='flex'),
+                color_scale_continuous=set_visibility({}, False, visible_style='flex')
+            )
+        is_discrete = schema.get_column_dtype(colorize_column) in ['str', 'category', 'bool']
+        return dict(
+            color_scale_discrete=set_visibility({}, is_discrete, visible_style='flex'),
+            color_scale_continuous=set_visibility({}, not is_discrete, visible_style='flex')
+        )
+
+
+    # CALLBACK, triggered by either of discrete/continuous color scale "preview" button
+    #           populates the color scale preview graph and opens the modal for viewing
+    def _color_scale_preview(self, nclicks, colorize_column, schema, use_dark_mode):
+        #print(f"_color_scale_preview({nclicks=}, {colorize_column=}, {schema=})")
+        schema = DatasourceSchema(**schema) if schema is not None else DatasourceSchema(columns=[], name="No data")
+        if colorize_column is None:
+            return dict(
+                color_scale_fig=dash.no_update,
+                color_scale_modal=False,
+                color_scale_modal_title=dash.no_update,
+            )
+        is_discrete = schema.get_column_dtype(colorize_column) in ['str', 'category', 'bool']
+        fig = qualitative_color_scales.swatches() if is_discrete else continuous_color_scales.swatches_continuous()
+        fig.update_layout(template=f"mantine_{'dark' if use_dark_mode else 'light'}_with_grid")
+        return dict(
+            color_scale_fig=fig,
+            color_scale_modal=True,
+            color_scale_modal_title=f"{'Discrete' if is_discrete else 'Continuous'} Color Scale Preview"
+        )
 
 
 
@@ -621,39 +813,48 @@ class Distro:
                 self,
                 columns,
                 dimensionality,
+                colorization,
                 global_filter_control,
                 individual_filter_controls,
                 plot_settings,
                 schema,
                 dimensionality_controls
             ):
-        print('='*80)
-        print(f"_plot_settings_changed({columns=}, {dimensionality=}, {global_filter_control=}, {individual_filter_controls=}, {plot_settings=}, {schema=}, {dimensionality_controls=})")
+        # print('='*80)
+        # print(f"_plot_settings_changed({columns=}, {dimensionality=}, {global_filter_control=}, {individual_filter_controls=}, {plot_settings=}, {schema=}, {dimensionality_controls=})")
         # print(f"{dash.callback_context.triggered=}")
         # print(f"{dash.callback_context.triggered_id=}")
         # print(f"{type(dash.callback_context.triggered_id)=}")
-        #print(f"{dash.callback_context.inputs_list=}")
-        #print(f"{dash.callback_context.states_list=}")
-        print(f"{dash.callback_context.states=}")
+        # print(f"{dash.callback_context.inputs_list=}")
+        # print(f"{dash.callback_context.states_list=}")
+        # print(f"{dash.callback_context.states=}")
         # print(f"{individual_filter_controls=}")
         
         trig_id = dash.callback_context.triggered_id
         plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
+        schema = DatasourceSchema(**schema) if schema is not None else DatasourceSchema(columns=[], name="No data")
 
         # ===== "Plot Settings" tab ======
         plot_settings.dimensionality = dimensionality
-        # modify visibility; set {display: none} or {display: block} as necessary
         ids_visible_only_3d = [self._p(x)+'.style' for x in ['z-column-select',]]
-        #print(f"{ids_visible_only_3d=}")
         def visibility_criteria(k): return (True) if dimensionality == '3d' else (k not in ids_visible_only_3d) #pylint: disable=multiple-statements
         dimensionality_styles = {
             k: set_visibility(v or {}, visibility_criteria(k))
                 for k,v in dash.callback_context.states.items()
                 if k.endswith('.style')
         }
-        #print(f"{dimensionality_styles=}")
         plot_settings.x_column = columns['x'].split('<<')[0] if columns['x'] else None
         plot_settings.y_column = columns['y'].split('<<')[0] if columns['y'] else None
+        if colorization['column'] is None:
+            plot_settings.color_enabled = False
+            plot_settings.color_column = None
+            plot_settings.color_column_type = 'discrete'
+            plot_settings.color_scale_name = 'T10'
+        else:
+            plot_settings.color_enabled = bool(colorization['enabled'])
+            plot_settings.color_column = colorization['column']
+            plot_settings.color_column_type = 'discrete' if schema.get_column_dtype(colorization['column']) in ['str', 'category', 'bool'] else 'continuous'
+            plot_settings.color_scale_name = colorization['discrete_scale' if plot_settings.color_column_type == 'discrete' else 'continuous_scale']
 
         # ===== "Filters" tab ======
         # global filter controls
@@ -705,7 +906,7 @@ class Distro:
     #CALLBACK, interaction with any of PlotSettings, ..., or the theme switcher
     #          updates the graph
     def _update_graph(self, use_dark_mode, plot_settings, schema):
-        #print(f"_update_graph({use_dark_mode=},   {plot_settings=},   {schema=})")
+        print(f"_update_graph({use_dark_mode=},   {plot_settings=},   {schema=})")
         try:
             plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
             schema = DatasourceSchema(**schema) if schema else DatasourceSchema(columns=[], name="No data")
@@ -721,6 +922,23 @@ class Distro:
                 data_name = schema.name
                 df = DuckDBMonitorMiddleware.get_dataframe(f"SELECT * FROM {data_name};")
             
+
+            # ===== Assign Colorization Groups =====
+            # even if disabled we still assign a "pseudo-group" to bin 100% of data into
+            color_column = plot_settings.color_column
+            if color_column: color_column = color_column.split('<<')[0]
+            ser_color_group = pd.Series('all', index=df.index).astype('category')
+            ser_color_value = pd.Series(np.nan, index=df.index).astype('float')
+            if color_column and plot_settings.color_enabled:
+                color_column = color_column.split('<<')[0]
+                if plot_settings.color_column_type == 'discrete':
+                    # for discrete types, the value itself is a group identifier -- override the pseudo-group
+                    ser_color_group = df[color_column].astype('category')
+                else:
+                    # for continuous types, there is only the 1 "all" pseudo-group, but we can use the color-column as the value for color scaling
+                    ser_color_value = df[color_column] if color_column else pd.Series(dtype='float')
+
+
             # ===== Filters =====
             boolmasks = [f.mask(df) for f in plot_settings.filters]
             df = df[functools.reduce(lambda l,r: (l & r), boolmasks, pd.Series(True, index=df.index))]
@@ -731,30 +949,88 @@ class Distro:
                 shared_yaxes=True, shared_xaxes=True,
                 vertical_spacing=0.02, horizontal_spacing=0.01
             )
-            ser_x = df[plot_settings.x_column]
-            ser_y = df[plot_settings.y_column]
-            fig.add_trace(go.Scatter(x=ser_x, y=ser_y, mode='markers'), row=2, col=1)
-            fig.add_trace(
-                go.Histogram(
-                    x=ser_x, nbinsx=50, marker=dict(opacity=0.5), bingroup=1,
-                    showlegend=False, name=plot_settings.x_column
-                ),
-                row=1, col=1
-            )
-            fig.add_trace(
-                go.Histogram(
-                    y=ser_y, nbinsy=50, marker=dict(opacity=0.5), bingroup=2,
-                    showlegend=False, name=plot_settings.y_column
-                ),
-                row=2, col=2
-            )
+            discrete_colorscale = plot_settings.get_color_scale(name=plot_settings.color_scale_name_discrete)
+            continuous_color_scale = plot_settings.get_color_scale(name=plot_settings.color_scale_name_continuous).iterable #type:ignore
+
+            for i, category in enumerate(ser_color_group.cat.categories):
+                group_df = df[ser_color_group == category]
+                group_x = group_df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=group_df.index)
+                group_y = group_df[plot_settings.y_column] if plot_settings.y_column else pd.Series(dtype='float', index=group_df.index)
+                group_z = group_df[plot_settings.z_column] if plot_settings.z_column else pd.Series(dtype='float', index=group_df.index)
+                group_color_value = group_df[color_column] if color_column else pd.Series(dtype='float', index=group_df.index)
+
+                if plot_settings.dimensionality == '2d':
+                    fig.add_trace(
+                        go.Scatter(
+                            x=group_x,
+                            y=group_y,
+                            mode='markers',
+                            name=str(category), legendgroup=str(category),
+                            showlegend=True,
+                            marker=functools.reduce(lambda l,r: l|r, [
+                                dict(
+                                    color=group_color_value,
+                                    colorscale=continuous_color_scale,
+                                    colorbar=dict(
+                                        title=f"<b>{color_column or ''}</b>",
+                                        title_font=dict(size=10)
+                                    ),
+                                ) if all([
+                                    category == 'all',
+                                    plot_settings.color_enabled,
+                                    plot_settings.color_column_type == 'continuous'
+                                ]) else dict(),
+
+
+                                dict(color=discrete_colorscale[i]) if all([ #type:ignore
+                                    category != 'all',
+                                    plot_settings.color_enabled,
+                                    plot_settings.color_column_type == 'discrete'
+                                ]) else dict()
+                            ])
+                        ),
+                        row=2, col=1
+                    )
+                    fig.add_trace(
+                        go.Histogram(
+                            x=group_x, nbinsx=50, bingroup=1,
+                            name=str(category), legendgroup=str(category),
+                            marker=dict(
+                                opacity=0.5,
+                                color=discrete_colorscale[i] if plot_settings.color_enabled and plot_settings.color_column_type == 'discrete' else discrete_colorscale[0] #type:ignore
+                            ), 
+                            showlegend=False,
+                        ),
+                        row=1, col=1
+                    )
+                    fig.add_trace(
+                        go.Histogram(
+                            y=group_y, nbinsy=50, bingroup=2,
+                            name=str(category), legendgroup=str(category),
+                            marker=dict(
+                                opacity=0.5,
+                                color=discrete_colorscale[i] if plot_settings.color_enabled and plot_settings.color_column_type == 'continuous' else discrete_colorscale[0] #type:ignore
+                            ), 
+                            showlegend=False
+                        ),
+                        row=2, col=2
+                    )
+                else:
+                    raise NotImplementedError("3D plotting is not yet implemented.")
 
             fig.update_layout(
                 title=f"<b>{data_name}:</b> {plot_settings.y_column} vs. {plot_settings.x_column}",
                 margin=dict(l=0, r=0, t=40, b=10),
                 barmode='overlay',
-                showlegend=True,
-                legend=dict(orientation='h'),
+                showlegend=len(ser_color_group.cat.categories) > 1,
+                legend=dict(
+                    orientation='v',
+                    yanchor='top', y=1.0,
+                    xanchor='right', x=1.0,
+                    bgcolor='rgba(255,255,255,0.8)',
+                    bordercolor='rgba(0,0,0,1.0)',
+                    borderwidth=1
+                ),
                 boxgap=0.1,
                 uirevision=True, # prevent automatic resize
                 template=f"mantine_{'dark' if use_dark_mode else 'light'}_with_grid",
@@ -839,17 +1115,61 @@ class Distro:
 
 
         dash.callback(
+            output={
+                'color_scale_discrete': Output(self._p('color-scale-discrete-group'), 'style'),
+                'color_scale_continuous': Output(self._p('color-scale-continuous-group'), 'style'),
+            },
+            inputs={
+                'colorize_column': Input(self._p('color-column-select'), 'value'),
+            },
+            state={
+                'schema': State(self._p('datasource-schema'), 'data'),
+            },
+
+            #prevent_initial_call=True
+        )(self._colorize_column_changed)
+
+
+        dash.callback(
+            output={
+                'color_scale_fig': Output(self._p('color-scale-preview-graph'), 'figure'),
+                'color_scale_modal': Output(self._p('color-scale-preview-modal'), 'opened'),
+                'color_scale_modal_title': Output(self._p('color-scale-preview-modal'), 'title'),
+            },
+            inputs={
+                'nclicks':{
+                    'discrete': Input(self._p('color-scale-discrete-preview'), 'n_clicks'),
+                    'continuous': Input(self._p('color-scale-continuous-preview'), 'n_clicks'),
+                },
+            },
+            state={
+                'colorize_column': State(self._p('color-column-select'), 'value'),
+                'schema': State(self._p('datasource-schema'), 'data'),
+                'use_dark_mode': State('color-scheme-switch', 'checked')
+            },
+
+            prevent_initial_call=True
+        )(self._color_scale_preview)
+
+
+        dash.callback(
             output = {
                 'plot_settings': Output(self._p('plot-settings'), 'data', allow_duplicate=True),
                 'dimensionality_controls': [
                     Output(self._p('x-column-select'), 'style'),
                     Output(self._p('y-column-select'), 'style'),
                     Output(self._p('z-column-select'), 'style'),
-                ]
+                ],
             },
             inputs={
                 'columns': dict(x=Input(self._p('x-column-select'), 'value'), y=Input(self._p('y-column-select'), 'value')),
                 'dimensionality': Input(self._p('dimensionality'), 'value'),
+                'colorization': dict(
+                    enabled=Input(self._p('color-enabled'), 'checked'),
+                    column=Input(self._p('color-column-select'), 'value'),
+                    discrete_scale=Input(self._p('color-scale-discrete-select'), 'value'),
+                    continuous_scale=Input(self._p('color-scale-continuous-select'), 'value'),
+                ),
                 'global_filter_control': {
                     'selected_filter_field': Input(self._p('select-filter-field'), 'value'),
                     'add_filter': Input(self._p('add-filter'), 'n_clicks'),
