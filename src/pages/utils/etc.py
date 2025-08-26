@@ -14,6 +14,7 @@ THIS_DIR = pl.Path(__file__).parent.resolve()
 BASE_DIR = THIS_DIR.parent.parent.resolve()
 
 
+# TODO: config stuff doesn't really belong here...
 def load_config() -> Dict[str, Any]:
     with open(BASE_DIR/'config.schema.json', 'r', encoding='utf8') as f:
         config_schema = jsonschema.Draft7Validator(json.load(f))

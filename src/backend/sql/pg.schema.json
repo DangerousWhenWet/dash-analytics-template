@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/sql-schemas.schema.json", 
+  "title": "SQL Schemas",
+  "$defs": {
+    "UnattendedPseudoIngestRequest": {
+      "type": "object",
+      "properties": {
+        "cluster": {
+          "type": "string",
+          "description": "Name of the database cluster to execute the query against",
+          "minLength": 1,
+          "examples": ["nucleus.home.arpa", "production-cluster", "dev-db"]
+        },
+        "database": {
+          "type": "string", 
+          "description": "Name of the specific database within the cluster", 
+          "minLength": 1,
+          "examples": ["foo", "bar", "baz", "production", "analytics"]
+        },
+        "sql": {
+          "type": "string",
+          "description": "SQL query to execute", 
+          "minLength": 1,
+          "examples": ["SELECT * FROM my_table;"]
+        },
+        "table_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "table_description": {
+          "type": ["string", "null"],
+          "default": null
+        },
+        "table_type": {
+          "type": "string",
+          "enum": ["system", "user-temporary", "user-persistent"],
+          "default": "system"
+        },
+        "owned_by": {
+          "type": "string", 
+          "default": "unknown"
+        },
+        "external_type": {
+          "type": "string",
+          "enum": ["postgres"],
+          "default": "postgres"
+        }
+      },
+      "required": ["cluster", "database", "sql", "table_name"],
+      "additionalProperties": false
+    },
+    "PseudoIngestRequest": {
+      "type": "object",
+      "properties": {
+        "cluster": {"$ref": "#/$defs/UnattendedPseudoIngestRequest/properties/cluster"},
+        "database": {"$ref": "#/$defs/UnattendedPseudoIngestRequest/properties/database"},
+        "sql": {"$ref": "#/$defs/UnattendedPseudoIngestRequest/properties/sql"}
+      },
+      "required": ["cluster", "database", "sql"],
+      "additionalProperties": false
+    }
+  }
+}

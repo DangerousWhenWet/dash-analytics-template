@@ -1,8 +1,6 @@
 #pylint: disable=missing-docstring,line-too-long,trailing-whitespace
-from contextlib import contextmanager
 import re
 from typing import Optional, Any, List, Set
-import warnings
 
 
 import duckdb
@@ -10,13 +8,6 @@ import pandas as pd
 import sqlparse
 
 from .base import DUCKDB
-
-
-@contextmanager
-def ignore_warnings():
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        yield
 
 
 class DuckDBMonitorMiddleware:
@@ -28,24 +19,16 @@ class DuckDBMonitorMiddleware:
     of DuckDB tables)
     """
     @staticmethod
-    def ask_available_tables(conn:Optional[duckdb.DuckDBPyConnection]=None, schema_name:str='datasets') -> List[str]:
-        sql = """
-            SELECT table_name 
-            FROM duckdb_tables() 
-            WHERE
-                schema_name = ? AND
-                --exclude system tables
-                table_name NOT IN (SELECT UNNEST(?)) AND
-                table_name NOT LIKE ?;
-        """
-        params = [schema_name,DUCKDB.SYSTEM_TABLES, DUCKDB.MOTHERDUCK_TABLES_WILDCARD]
-        
-        if conn:
-            result_set = conn.execute(sql, params).fetchall()
-        else:
-            with duckdb.connect(DUCKDB.PATH, read_only=True) as conn:
-                result_set = conn.execute(sql, params).fetchall()
-        return [row[0] for row in result_set]
+    def ask_available_tables(conn:Optional[duckdb.DuckDBPyConnection]=None) -> List[str]:
+        supplied_conn = conn is not None
+        try:
+            conn = conn or duckdb.connect(DUCKDB.PATH, read_only=True)
+            sql = "SELECT table_name FROM administrative.table_catalog WHERE external_type IS NULL;"
+            result_set = conn.execute(sql).fetchall()
+            return [row[0] for row in result_set]
+        finally:
+            if not supplied_conn:
+                conn.close() #type:ignore
 
 
     @staticmethod
