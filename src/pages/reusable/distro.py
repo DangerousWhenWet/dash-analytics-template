@@ -1,15 +1,15 @@
-#pylint: disable=missing-docstring, trailing-whitespace, line-too-long, multiple-statements, use-dict-literal
+#pylint: disable=missing-docstring, trailing-whitespace, line-too-long, multiple-statements, use-dict-literal, bare-except
 import datetime as dt
 import functools
 import itertools
 import traceback
 from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict, Generic, Iterable, TypeVar, Type
 
+from dateutil import parser as date_parser
 import dash
 from dash import dcc, html, Input, Output, State
 from dash_iconify import DashIconify
 import dash_mantine_components as dmc
-import numpy as np
 import pandas as pd
 from plotly.colors import qualitative as qualitative_color_scales, sequential as continuous_color_scales
 import plotly.graph_objects as go
@@ -92,7 +92,7 @@ class DatasourceSchema(BaseModel):
     def from_df(data_name:str, data_df:pd.DataFrame) -> 'DatasourceSchema':
         print(f"DatasourceSchema.from_df({data_name=}, {data_df.dtypes=})")
         #which_type = lambda col: str(data_df[col].dtype) if pd.api.types.is_numeric_dtype(data_df[col]) else ('category' if isinstance(data_df[col].dtype, pd.CategoricalDtype) else 'str')
-        def which_type(col, data_df=data_df) -> DtypeType:
+        def which_type(col:str, data_df=data_df) -> DtypeType:
             if isinstance(data_df[col].dtype, pd.CategoricalDtype):
                 return 'category'
             elif pd.api.types.is_integer_dtype(data_df[col]):
@@ -102,7 +102,13 @@ class DatasourceSchema(BaseModel):
             elif pd.api.types.is_bool_dtype(data_df[col]):
                 return 'bool'
             elif pd.api.types.is_datetime64_any_dtype(data_df[col]):
-                return 'datetime'
+                dtcol = data_df[col].dropna()
+                time_components = (getattr(dtcol.dt, x, None) for x in ['hour', 'minute', 'second', 'microsecond', 'nanosecond'])
+                if sum((x.sum() for x in time_components if x is not None), 0) == 0:
+                    # each and every datetime in the column has no time components recorded; ergo, it represents a plain date, not a datetime
+                    return 'date'
+                else:
+                    return 'datetime'
             else:
                 return 'str'
         def etc(col, dtype, data_df=data_df) -> Dict[str, Any]:
@@ -577,17 +583,150 @@ class FloatFilter(_NumericFilter):
         except ValueError:
             return None
 
-    # icon_map: ClassVar[Dict[str,str]] = {
-    #     'str': 'radix-icons:text',
-    #     'category': 'material-symbols:category-outline',
-    #     'int': 'carbon:string-integer',
-    #     'float': 'lsicon:decimal-filled',
-    #     'bool': 'ix:data-type-boolean',
-    #     'date': 'fluent-mdl2:event-date',
-    #     'datetime': 'fluent-mdl2:date-time',
-    # }
+
+class _DateFilter(Filter):
+    dtype: Any = None
+    icon: ClassVar[str] = "fluent-mdl2:event-date"
+    value: Optional[Any] = None
+    operator: NumericOperatorType = 'greater-equal'
+    dateOnly: ClassVar[bool] = False
+
+    @property
+    def layout(self):
+        id_neg, id_op, id_enab, id_val, id_del = self.dash_ids
+        return dmc.Card(
+            withBorder=True,
+            children=[
+                dmc.CardSection(children=[
+                    dmc.Group(
+                        wrap='nowrap',
+                        children=[
+                            DashIconify(icon=self.icon, width=20, height=20),
+                            dmc.Tooltip(
+                                children=dmc.Text(
+                                    children=self.column,
+                                    size="sm",
+                                    fw="bold",
+                                    truncate='end',
+                                    flex=1,
+                                    # make it look like a dmc.Code
+                                    c="var(--mantine-color-text)", #type: ignore
+                                    bg="var(--mantine-color-gray-1)", #type: ignore
+                                    ff="monospace",
+                                    px=1,
+                                    py=1,
+                                    style={"borderRadius": "4px", "border": "1px solid var(--mantine-color-gray-3)"}
+                                ),
+                                label=self.column,
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                                boxWrapperProps={'flex': '1'},
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.Switch(
+                                    id=id_neg, #type: ignore
+                                    offLabel=DashIconify(icon="mdi:equal", width=15,),
+                                    onLabel=DashIconify(icon="ic:baseline-not-equal", width=15,),
+                                    checked=self.negated
+                                ),
+                                label='Logical negation: "IS" or "IS NOT"',
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            ),
+                            dmc.Select(
+                                id=id_op, #type: ignore
+                                data=get_args(NumericOperatorType),
+                                value=self.operator,
+                                clearable=False,
+                                size="xs",
+                                w='33%',
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.Checkbox(
+                                    id=id_enab, #type: ignore
+                                    checked=self.enabled,
+                                    size="xs",
+                                ),
+                                label="Enable/disable filter",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            )
+                        ]
+                    ),
+                    dmc.Group(
+                        wrap='nowrap',
+                        children=[
+                            (dmc.DateInput if self.dateOnly else dmc.DateTimePicker)(
+                                id=id_val, #type:ignore
+                                placeholder="Filter date...",
+                                variant='default',
+                                size='xs',
+                                hideControls=True,
+                                flex=1
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.ActionIcon(
+                                    DashIconify(icon='material-symbols:close', width=20, height=20),
+                                    id=id_del, #type: ignore
+                                    variant='transparent',
+                                    size='xs',
+                                ),
+                                label="Remove filter",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            )
+                        ]
+                    )
+                ])
+            ]
+        )
+
+    def mask(self, df:pd.DataFrame) -> pd.Series:
+        if any((self.value is None, self.value=='', self.enabled is False)): return pd.Series(True, index=df.index)
+        match self.operator:
+            case 'equal':           mask = df[self.column] == self.value
+            case 'greater':         mask = df[self.column] > self.value
+            case 'less':            mask = df[self.column] < self.value
+            case 'greater-equal':   mask = df[self.column] >= self.value
+            case 'less-equal':      mask = df[self.column] <= self.value
+            case _: raise ValueError(f"Unknown operator: {self.operator}")
+        return ~mask if self.negated else mask
+    
+    def cast(self, x: Any) -> Optional[dt.datetime]:
+        if isinstance(x, dt.datetime): return x
+        elif isinstance(x, str): return date_parser.parse(x)
+        elif isinstance(x, (int, float)): return dt.datetime.fromtimestamp(x)
+        else: return None
+
+
+class DateFilter(_DateFilter):
+    dtype: Literal['date'] = 'date'
+    icon: ClassVar[str] = "fluent-mdl2:event-date"
+    value: Optional[dt.date] = None
+    dateOnly: ClassVar[bool] = True
+
+
+class DateTimeFilter(_DateFilter):
+    dtype: Literal['datetime'] = 'datetime'
+    icon: ClassVar[str] = "fluent-mdl2:date-time"
+    value: Optional[dt.datetime] = None
+    dateOnly: ClassVar[bool] = False
+
+
 FilterUnionType = FilterUnion = Annotated[
-    Union[StringFilter, CategoryFilter, IntFilter, FloatFilter],
+    Union[
+        StringFilter,
+        CategoryFilter,
+        IntFilter,
+        FloatFilter,
+        # BoolFilter,
+        DateFilter,
+        DateTimeFilter
+    ],
     Field(discriminator='dtype')
 ]
 FILTER_DTYPE_MAP = {
@@ -596,8 +735,8 @@ FILTER_DTYPE_MAP = {
     'int': IntFilter,
     'float': FloatFilter,
     # 'bool': BoolFilter,
-    # 'date': DateFilter,
-    # 'datetime': DateTimeFilter
+    'date': DateFilter,
+    'datetime': DateTimeFilter
 }
 
 
@@ -1263,7 +1402,7 @@ class Distro:
                 data_name, df = self._datasource_getter()
             else:
                 data_name = schema.name
-                df = DuckDBMonitorMiddleware.get_dataframe(f"SELECT * FROM {data_name};")
+                df = DuckDBMonitorMiddleware.get_dataframe(f"SELECT * FROM datasets.{data_name};")
             
 
             # ===== Assign Colorization Groups =====
@@ -1555,7 +1694,7 @@ class Distro:
 
 
 def demo_iris_getter() -> Tuple[str, pd.DataFrame]:
-    df = DuckDBMonitorMiddleware.get_dataframe("SELECT * FROM iris;")
+    df = DuckDBMonitorMiddleware.get_dataframe("SELECT * FROM datasets.iris;")
     df['Species'] = df['Species'].astype('category')
     df['Petal.Width'] = df['Petal.Width'].astype('int')
     return "iris", df
