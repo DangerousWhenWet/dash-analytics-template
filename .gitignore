@@ -3,3 +3,4 @@
 **/__pycache
 .vscode
 .devtools/data
+**/config.hjson

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/database-config.schema.json",
+  "title": "Database Configuration",
+  "description": "Multi-database configuration schema with support for different database types and clusters",
+  "type": "object",
+  "properties": {
+    "PostgreSQL": {
+      "type": "object",
+      "description": "PostgreSQL database configurations",
+      "properties": {
+        "clusters": {
+          "type": "object",
+          "description": "Named PostgreSQL clusters",
+          "patternProperties": {
+            "^.+$": {
+              "type": "object",
+              "description": "Individual cluster configuration",
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "description": "Database host address",
+                  "examples": ["nucleus.home.arpa", "localhost", "db.example.com"]
+                },
+                "port": {
+                  "type": "integer",
+                  "description": "Database port number",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "examples": [5432, 3306, 5984]
+                },
+                "username": {
+                  "type": "string",
+                  "description": "Database username for authentication",
+                  "examples": ["postgres", "admin", "dbuser"]
+                },
+                "password": {
+                  "type": "string",
+                  "description": "Database password for authentication"
+                },
+                "databases": {
+                  "type": "array",
+                  "description": "List of database names",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "examples": [["foo", "bar", "baz"], ["production", "staging"]]
+                }
+              },
+              "required": ["host", "port", "username", "password", "databases"],
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        }
+      },
+      "required": ["clusters"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["PostgreSQL"],
+  "additionalProperties": false
+}

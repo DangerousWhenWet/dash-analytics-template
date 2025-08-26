@@ -1,0 +1,17 @@
+{
+    PostgreSQL: {
+        clusters: {
+            "friendly_name": {
+                host: database.com
+                port: 5432
+                username: postgres
+                password: ill-never-tell
+                databases: [
+                    foo
+                    bar
+                    baz
+                ]
+            }
+        }
+    }
+}

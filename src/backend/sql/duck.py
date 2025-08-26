@@ -28,17 +28,17 @@ class DuckDBMonitorMiddleware:
     of DuckDB tables)
     """
     @staticmethod
-    def ask_available_tables(conn:Optional[duckdb.DuckDBPyConnection]=None) -> List[str]:
+    def ask_available_tables(conn:Optional[duckdb.DuckDBPyConnection]=None, schema_name:str='datasets') -> List[str]:
         sql = """
             SELECT table_name 
             FROM duckdb_tables() 
             WHERE
-                schema_name = 'main' AND
+                schema_name = ? AND
                 --exclude system tables
                 table_name NOT IN (SELECT UNNEST(?)) AND
                 table_name NOT LIKE ?;
         """
-        params = [DUCKDB.SYSTEM_TABLES, DUCKDB.MOTHERDUCK_TABLES_WILDCARD]
+        params = [schema_name,DUCKDB.SYSTEM_TABLES, DUCKDB.MOTHERDUCK_TABLES_WILDCARD]
         
         if conn:
             result_set = conn.execute(sql, params).fetchall()
@@ -105,38 +105,12 @@ class DuckDBMonitorMiddleware:
         #     multiple occurences across the query still only count as one hit
         #     each one "hit" we will +1 to the `hits` column
         if referenced_tables := DuckDBMonitorMiddleware._find_referenced_tables(sql, tables):
-            DuckDBMonitorMiddleware.log_table_usage(referenced_tables, conn=conn, ensure_exists=True)
-    
-    # @staticmethod
-    # def log_table_usage(tables: List[str], conn:Optional[duckdb.DuckDBPyConnection]=None, ensure_exists:bool=True):
-    #     sql_ensure_exists = """
-    #         INSERT INTO administrative.usage_tracking (table_name)
-    #         SELECT UNNEST(?)
-    #         ON CONFLICT (table_name) DO NOTHING;
-    #     """
-    #     params_ensure_exists = [DuckDBMonitorMiddleware.ask_available_tables(conn)]
-
-    #     sql_increment_hits = """
-    #         UPDATE administrative.usage_tracking
-    #         SET hits = hits + 1, last_hit = CURRENT_TIMESTAMP
-    #         WHERE table_name IN (SELECT UNNEST(?));
-    #     """
-    #     params_increment_hits = [tables]
-        
-    #     if conn:
-    #         if ensure_exists:
-    #             conn.execute(sql_ensure_exists, params_ensure_exists)
-    #         conn.execute(sql_increment_hits, params_increment_hits)
-    #     else:
-    #         with duckdb.connect(DUCKDB.PATH) as conn:
-    #             if ensure_exists:
-    #                 conn.execute(sql_ensure_exists, params_ensure_exists)
-    #             conn.execute(sql_increment_hits, params_increment_hits)
+            DuckDBMonitorMiddleware.log_table_usage(referenced_tables, conn=conn)
 
     @staticmethod
-    def log_table_usage(tables: List[str], conn:Optional[duckdb.DuckDBPyConnection]=None, ensure_exists:bool=True):
+    def log_table_usage(tables: List[str], conn:Optional[duckdb.DuckDBPyConnection]=None):
         sql_upsert = """
-            INSERT INTO administrative.usage_tracking (table_name, hits, last_hit)
+            INSERT INTO administrative.table_catalog (table_name, hits, last_hit)
             SELECT table_name, 1, NOW()
             FROM (SELECT UNNEST(?) AS table_name)
             ON CONFLICT (table_name) DO UPDATE SET
@@ -156,8 +130,33 @@ class DuckDBMonitorMiddleware:
             #       we are dealing with the problem by applying an Ostrich Algorithm ;)
             pass
 
+
     @staticmethod
-    def get_dataframe(sql: str, skip_logging:bool=False, *args, **kwargs):
+    def log_table_update(tables: List[str], conn: Optional[duckdb.DuckDBPyConnection] = None):
+        sql_upsert = """
+            INSERT INTO administrative.table_catalog (table_name, updates, updated)
+            SELECT table_name, 1, NOW()
+            FROM (SELECT UNNEST(?) AS table_name)
+            ON CONFLICT (table_name) DO UPDATE SET
+                updates = updates + 1,
+                updated = NOW();
+        """
+        params_upsert = [tables]
+
+        try:
+            if conn:
+                conn.execute(sql_upsert, params_upsert)
+            else:
+                with duckdb.connect(DUCKDB.PATH) as conn:
+                    conn.execute(sql_upsert, params_upsert)
+        except duckdb.TransactionException:
+            # NOTE: with high concurrency on same record this can happen. e.g. multiple celery workers hitting on the same datasource.
+            #       we are dealing with the problem by applying an Ostrich Algorithm ;)
+            pass
+
+
+    @staticmethod
+    def get_dataframe(sql: str, *args, skip_logging:bool=False, **kwargs):
         with ignore_warnings(), duckdb.connect(DUCKDB.PATH, *args, **kwargs) as conn:
             if not skip_logging:
                 DuckDBMonitorMiddleware.log_query(sql, conn)
