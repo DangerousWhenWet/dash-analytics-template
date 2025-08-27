@@ -10,6 +10,7 @@ import dash
 from dash import dcc, html, Input, Output, State
 from dash_iconify import DashIconify
 import dash_mantine_components as dmc
+import duckdb
 import pandas as pd
 from plotly.colors import qualitative as qualitative_color_scales, sequential as continuous_color_scales
 import plotly.graph_objects as go
@@ -17,7 +18,7 @@ from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field, ValidationError
 
 from backend.jobqueue import tasks
-from backend.sql.duck import DuckDBMonitorMiddleware
+from backend.sql import base, DuckDBMonitorMiddleware, PostgresMonitorMiddleware
 from pages.utils.etc import make_prefixer
 from pages.utils.extended_page_registry import PageRegistryInput
 
@@ -774,6 +775,13 @@ def error_figure(use_dark_mode:bool, err_text:str) -> go.Figure:
     return err_fig
 
 
+def dropdown_entry(s:str) -> Dict[str, Any]:
+    return {
+        'value': s,
+        'label': s
+    }
+
+
 class Distro:
     def __init__(   self,
                     id_prefix:str,
@@ -789,6 +797,13 @@ class Distro:
 
 
     def layout(self):
+        if self._datasource_getter is None:
+            base.update_connection_map()
+            selectable_tables = base.get_selectable_tables()
+        else:
+            selectable_tables = []
+
+
         return [
             dcc.Store(id=self._p('datasource-schema'), data=None),
             dcc.Store(id=self._p('plot-settings'), data=None),
@@ -808,7 +823,7 @@ class Distro:
                         id=self._p('select-datasource'),
                         label='Built-in Datasets',
                         placeholder='Select one...',
-                        data=DuckDBMonitorMiddleware.ask_available_tables(),
+                        data=selectable_tables, #type:ignore
                     ),
                     dmc.Button('Confirm', id=self._p('confirm-datasource'), mt=2),
                 ]
@@ -1186,12 +1201,15 @@ class Distro:
 
     # CALLBACK, triggered by confirm button in modal
     #           modifies DatasourceSchema according to user's selected datasource (also hides the modal)
-    def _confirm_datasource(self, _, data_name):
-        if data_name is None:
-            #print("_confirm_datasource() -> data_name is None")
+    def _confirm_datasource(self, _, table_name):
+        if table_name is None:
+            #print("_confirm_datasource() -> table_name is None")
             return dash.no_update, dash.no_update
-        data_df = DuckDBMonitorMiddleware.get_dataframe(f"SELECT * FROM {data_name};")
-        schema = DatasourceSchema.from_df(data_name, data_df)
+        connection = base.map_tables_to_connections[table_name]
+        print(f"_confirm_datasource({table_name=}) -> {connection=}")
+        with duckdb.connect(base.DUCKDB.PATH) as duck_conn:
+            data_df = cast(pd.DataFrame, connection.get_dataframe(table_name=table_name, duck_conn=duck_conn))
+        schema = DatasourceSchema.from_df(table_name, data_df)
         plot_settings = PlotSettings(
             x_column=schema.columns[0].key,
             y_column=schema.columns[1].key if len(schema.columns) > 1 else schema.columns[0].key
@@ -1399,11 +1417,12 @@ class Distro:
                 err_fig = error_figure(use_dark_mode, err_text)
                 return err_fig
             if self._datasource_getter:
-                data_name, df = self._datasource_getter()
+                table_name, df = self._datasource_getter()
             else:
-                data_name = schema.name
-                df = DuckDBMonitorMiddleware.get_dataframe(f"SELECT * FROM datasets.{data_name};")
-            
+                table_name = schema.name
+                connection = base.map_tables_to_connections[table_name]
+                df = cast(pd.DataFrame, connection.get_dataframe(table_name=table_name))
+
 
             # ===== Assign Colorization Groups =====
             # even if disabled we still assign a "pseudo-group" to bin 100% of data into
@@ -1498,7 +1517,7 @@ class Distro:
                     raise NotImplementedError("3D plotting is not yet implemented.")
 
             fig.update_layout(
-                title=f"<b>{data_name}:</b> {plot_settings.y_column} vs. {plot_settings.x_column}",
+                title=f"<b>{table_name}:</b> {plot_settings.y_column} vs. {plot_settings.x_column}",
                 margin=dict(l=0, r=0, t=40, b=10),
                 barmode='overlay',
                 showlegend=len(ser_color_group.cat.categories) > 1,

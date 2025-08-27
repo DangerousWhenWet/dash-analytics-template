@@ -8,13 +8,13 @@ import dash_mantine_components as dmc
 import hjson
 import plotly.io as pio
 
-from backend.sql.base import DUCKDB
+from backend.sql import base
 from pages.utils import navbar as nbar, extended_page_registry as epr
 
 
 with open('dense.mantine-theme.hjson', 'r', encoding='utf8') as f:
     theme = hjson.load(f)
-DUCKDB.init()
+base.init()
 
 # set up chart theming
 dmc.add_figure_templates()

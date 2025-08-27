@@ -1,8 +1,10 @@
-#pylint: disable=missing-docstring, line-too-long, trailing-whitespace
+#pylint: disable=missing-docstring, line-too-long, trailing-whitespace, redefined-outer-name, unused-argument, unnecessary-ellipsis
 from contextlib import contextmanager
+import functools
+import itertools
 import json
 import pathlib as pl
-from typing import cast, Optional, Literal, Dict, List, Any
+from typing import cast, Optional, Literal, Dict, List, Any, Protocol, TypeVar
 import warnings
 
 import appdirs
@@ -141,6 +143,7 @@ class DUCKDB: #pylint: disable=too-few-public-methods
 
         finally:
             if not supplied_conn:
+                print("DUCKDB.ingest closing its own connection")
                 conn.close() #type: ignore
     
     @staticmethod
@@ -172,7 +175,8 @@ class DUCKDB: #pylint: disable=too-few-public-methods
                     raise ValueError(f"Unknown external_type: {external_type}")
             
             conn = conn or duckdb.connect(DUCKDB.PATH)
-            if table_already_exists := conn.execute("SELECT COUNT(*) FROM duckdb_tables() WHERE schema_name = 'datasets' AND table_name = ?;", [table_name]).fetchone():
+            #if table_already_exists := conn.execute("SELECT COUNT(*) FROM duckdb_tables() WHERE schema_name = 'datasets' AND table_name = ?;", [table_name]).fetchone():
+            if table_already_exists := conn.execute("SELECT COUNT(*) FROM administrative.table_catalog WHERE table_name = ?;", [table_name]).fetchone():
                 table_already_exists = bool(table_already_exists[0])
             
             params = {k:v for k,v in zip(
@@ -201,6 +205,7 @@ class DUCKDB: #pylint: disable=too-few-public-methods
                 )
         finally:
             if not supplied_conn:
+                print("DUCKDB.pseudo_ingest closing its own connection")
                 conn.close() #type: ignore
 
 
@@ -208,15 +213,40 @@ class POSTGRES: #pylint: disable=too-few-public-methods
     """
     It's a singleton container for Postgres cluster connections info.
     """
-    CLUSTERS: Dict[str, Dict[str, Any]] = config.get('PostgreSQL', {}).get('clusters', {})
-    with open(THIS_DIR/'pg.schema.json', 'r', encoding='utf8') as f:
-        _schema = json.load(f)
-        _resolver = jsonschema.RefResolver.from_schema(_schema)
-    ETC_SCHEMA = jsonschema.Draft202012Validator({"$ref": "#/$defs/PseudoIngestRequest"}, resolver=_resolver)
-    HJSON_SCHEMA = jsonschema.Draft202012Validator({"$ref": "#/$defs/UnattendedPseudoIngestRequest"}, resolver=_resolver)
+    # CLUSTERS: Dict[str, Dict[str, Any]] = config.get('PostgreSQL', {}).get('clusters', {})
+    # with open(THIS_DIR/'pg.schema.json', 'r', encoding='utf8') as f:
+    #     _schema = json.load(f)
+    #     _resolver = jsonschema.RefResolver.from_schema(_schema)
+    # MAP_DATABASES_TO_CLUSTERS = {
+    #     db_name: cluster_name
+    #     for cluster_name, cluster_info in CLUSTERS.items()
+    #     for db_name in cluster_info.get("databases", [])
+    # }
+    # ETC_SCHEMA = jsonschema.Draft202012Validator({"$ref": "#/$defs/PseudoIngestRequest"}, resolver=_resolver)
+    # HJSON_SCHEMA = jsonschema.Draft202012Validator({"$ref": "#/$defs/UnattendedPseudoIngestRequest"}, resolver=_resolver)
+    CLUSTERS: Dict[str, Dict[str, Any]] = {}
+    MAP_DATABASES_TO_CLUSTERS: Dict[str, str] = {}
+    ETC_SCHEMA: jsonschema.Draft202012Validator = None #type: ignore
+    HJSON_SCHEMA: jsonschema.Draft202012Validator = None #type: ignore
+
+    @classmethod
+    def reload_config(cls):
+        cls.CLUSTERS: Dict[str, Dict[str, Any]] = config.get('PostgreSQL', {}).get('clusters', {})
+        with open(THIS_DIR/'pg.schema.json', 'r', encoding='utf8') as f:
+            _schema = json.load(f)
+            _resolver = jsonschema.RefResolver.from_schema(_schema)
+        cls.MAP_DATABASES_TO_CLUSTERS = {
+            db_name: cluster_name
+            for cluster_name, cluster_info in cls.CLUSTERS.items()
+            for db_name in cluster_info.get("databases", [])
+        }
+        cls.ETC_SCHEMA = jsonschema.Draft202012Validator({"$ref": "#/$defs/PseudoIngestRequest"}, resolver=_resolver)
+        cls.HJSON_SCHEMA = jsonschema.Draft202012Validator({"$ref": "#/$defs/UnattendedPseudoIngestRequest"}, resolver=_resolver)
+
 
     @staticmethod
     def init(conn:Optional[duckdb.DuckDBPyConnection] = None):
+        POSTGRES.reload_config()
         for hjson_file in (THIS_DIR/'pg_datasets').glob('*.hjson'):
             POSTGRES.ingest_hjson(hjson_file, conn=conn)
 
@@ -257,35 +287,98 @@ class POSTGRES: #pylint: disable=too-few-public-methods
                 table_type=definition.get('table_type'),
                 owned_by=definition.get('owned_by'),
                 external_type='postgres',
-                etc={k:definition[k] for k in ('cluster', 'database', 'sql')},
+                etc={k:v for k,v in {k:definition.get(k) for k in ('cluster', 'cluster_friendly_name', 'database', 'sql', 'post_process')}.items() if v is not None},
                 conn=conn
             )
 
 
+ConnectionContext = TypeVar('ConnectionContext', covariant=True) #pylint: disable=typevar-name-incorrect-variance
+class ConnectionDetail(Protocol[ConnectionContext]):
+    def connect(self, *args, **kwargs) -> ConnectionContext:
+        """Return a database connector context manager"""
+        ...
+
+    def get_dataframe(
+        self,
+        *args,
+        table_name: Optional[str] = None,
+        duck_conn: Optional[duckdb.DuckDBPyConnection] = None,
+        skip_logging:bool=False, 
+        **kwargs
+    ) -> Optional[pd.DataFrame]:
+        """Get a DataFrame from the specified table."""
+        ...
+    
+    @property
+    def friendly_name(self) -> str:
+        """Returns human-friendly text name of this connection."""
+        ...
+
+
+class DuckDbConnectionDetail:
+    def connect(self, *args, **kwargs) -> duckdb.DuckDBPyConnection:
+        return duckdb.connect(DUCKDB.PATH, *args, **kwargs)
+
+    def get_dataframe(self, *args, table_name:Optional[str]=None, sql:Optional[str]=None, skip_logging:bool=False, **kwargs) -> Optional[pd.DataFrame]:
+        from .duck import DuckDBMonitorMiddleware  #pylint: disable=import-outside-toplevel
+        if all([table_name is None, sql is None]):
+            raise ValueError("Either table_name or sql must be provided.")
+        sql = sql or f"SELECT * FROM datasets.{table_name};"
+        return DuckDBMonitorMiddleware.get_dataframe(sql, skip_logging=skip_logging)
+
+    @property
+    def friendly_name(self) -> str:
+        return "Flatfiles"
+
+
 class PostgresConnectionDetail(BaseModel):
-    host: str
+    cluster: str
+    cluster_friendly_name: Optional[str] = None
     port: int
     username: str
     password: str
-    databases: List[str]
+    database: str
 
-    def connect(self, database: str) -> pg.extensions.connection:
-        if database not in self.databases:
-            raise ValueError(f"Database '{database}' is not in the list of available databases.")
+    def connect(self, *args, **kwargs) -> pg.extensions.connection:
         return pg.connect(
-            host=self.host,
+            host=self.cluster,
             port=self.port,
             user=self.username,
             password=self.password,
-            database=database
+            database=self.database
         )
+    
+    def get_dataframe(self, table_name:str, *args, duck_conn:Optional[duckdb.DuckDBPyConnection]=None, skip_logging:bool=False, **kwargs) -> Optional[pd.DataFrame]:
+        """
+        for convenience, it's just an alias/wrapper for the PostgresMonitorMiddleware singleton
+        """
+        print(f"PostgresConnectionDetail.get_dataframe({table_name=}, {duck_conn=}, {skip_logging=})")
+        from .postgres import PostgresMonitorMiddleware #pylint: disable=import-outside-toplevel
+        return PostgresMonitorMiddleware.get_dataframe(table_name, conn=duck_conn, skip_logging=skip_logging)
+    
+    @property
+    def friendly_name(self) -> str:
+        return f"PostgreSQL: {self.database}@{self.cluster_friendly_name or self.cluster}"
 
-def get_external_connection_detail(external_type:Literal['postgres'], etc:Dict[str, Any], config:Optional[Dict[str, Any]]=None) -> Optional[PostgresConnectionDetail]:
+
+def get_connection_detail(connection_type:Literal['duck', 'postgres'], table_name:str, etc:Optional[Dict[str, Any]]=None, config:Optional[Dict[str, Any]]=None) -> Optional[ConnectionDetail[Any]]:
     config = config or load_config()
+    etc = etc or {}
     try:
-        match external_type:
+        match connection_type:
+            case 'duck':
+                return DuckDbConnectionDetail()
             case 'postgres':
-                return PostgresConnectionDetail(**config.get('PostgreSQL', {}).get('clusters', {}).get(etc['cluster'], {}))
+                return PostgresConnectionDetail(**(
+                    functools.reduce(
+                        lambda l,r: l | r,
+                        [
+                            config['PostgreSQL']['clusters'].get(etc['cluster'], {}),  # base cluster properties from main app config
+                            {k:etc[k] for k in ('cluster_friendly_name', 'database')}, # supporting properties from etc/individual datasource definition
+                        ]
+                    )
+                    
+                ))
             case _:
                 return None
     except Exception as e: #pylint:disable=broad-except
@@ -293,8 +386,42 @@ def get_external_connection_detail(external_type:Literal['postgres'], etc:Dict[s
         return None
 
 
+#module global singleton map of key: table_name in the catalog, value: a connection detail object capable of providing connection and friendly name of the backend
+map_tables_to_connections: Dict[str, ConnectionDetail[Any]] = {}
+def update_connection_map(conn: Optional[duckdb.DuckDBPyConnection] = None):
+    supplied_conn = conn is not None
+    try:
+        conn = conn or duckdb.connect(DUCKDB.PATH, read_only=True)
+        from . import DuckDBMonitorMiddleware, PostgresMonitorMiddleware  #pylint: disable=import-outside-toplevel
+        global map_tables_to_connections #pylint: disable=global-statement
+        duck_details = {tbl: get_connection_detail('duck', tbl, cast(Dict[str, Any], {})) for tbl in DuckDBMonitorMiddleware.ask_available_tables(conn=conn,)}
+        duck_details = {k:v for k,v in duck_details.items() if v is not None}
+        pg_details = {tbl: get_connection_detail('postgres', tbl, cast(Dict[str, Any], etc)) for (tbl, etc) in PostgresMonitorMiddleware.ask_available_tables(conn=conn, with_etc=True)}
+        pg_details = {k:v for k,v in pg_details.items() if v is not None}
+        map_tables_to_connections = duck_details | pg_details
+    finally:
+        if not supplied_conn:
+            print("update_connection_map closing its own connection")
+            conn.close() #type: ignore
+
+
+def get_selectable_tables():
+    ungrouped_tables = sorted(
+        [(detail.friendly_name, table_name) for table_name, detail in map_tables_to_connections.items()],
+        key=lambda tup: tup[0]
+    )
+    selectable_tables = [
+        {
+            'group': cluster_key,
+            'items': [{'value': tbl, 'label': tbl} for _, tbl in tables_in_cluster]
+        }
+        for cluster_key, tables_in_cluster in itertools.groupby(ungrouped_tables, key=lambda x: x[0])
+    ]
+    return selectable_tables
+
 def init(wipe:bool=False):
     DUCKDB.init(wipe=wipe)
     with duckdb.connect(DUCKDB.PATH) as conn:
         POSTGRES.init(conn=conn)
         conn.sql('CHECKPOINT;') # for WAL
+    update_connection_map()

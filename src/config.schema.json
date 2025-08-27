@@ -17,7 +17,7 @@
               "type": "object",
               "description": "Individual cluster configuration",
               "properties": {
-                "host": {
+                "cluster": {
                   "type": "string",
                   "description": "Database host address",
                   "examples": ["nucleus.home.arpa", "localhost", "db.example.com"]
@@ -50,7 +50,7 @@
                   "examples": [["foo", "bar", "baz"], ["production", "staging"]]
                 }
               },
-              "required": ["host", "port", "username", "password", "databases"],
+              "required": ["cluster", "port", "username", "password", "databases"],
               "additionalProperties": false
             }
           },

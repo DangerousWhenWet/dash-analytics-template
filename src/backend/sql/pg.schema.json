@@ -12,6 +12,12 @@
           "minLength": 1,
           "examples": ["nucleus.home.arpa", "production-cluster", "dev-db"]
         },
+        "cluster_friendly_name": {
+          "type": "string",
+          "description": "Human-friendly name for the database cluster",
+          "minLength": 1,
+          "examples": ["Nucleus", "Production Cluster", "Development Database"]
+        },
         "database": {
           "type": "string", 
           "description": "Name of the specific database within the cluster", 
@@ -45,6 +51,15 @@
           "type": "string",
           "enum": ["postgres"],
           "default": "postgres"
+        },
+        "post_process": {
+          "type": "string",
+          "description": "Python script to post-process the DataFrame",
+          "minLength": 1,
+          "examples": [
+            "df = df[df['value'] > 0]",
+            "df['new_column'] = df['value'] * 2"
+          ]
         }
       },
       "required": ["cluster", "database", "sql", "table_name"],
@@ -54,8 +69,10 @@
       "type": "object",
       "properties": {
         "cluster": {"$ref": "#/$defs/UnattendedPseudoIngestRequest/properties/cluster"},
+        "cluster_friendly_name": {"$ref": "#/$defs/UnattendedPseudoIngestRequest/properties/cluster_friendly_name"},
         "database": {"$ref": "#/$defs/UnattendedPseudoIngestRequest/properties/database"},
-        "sql": {"$ref": "#/$defs/UnattendedPseudoIngestRequest/properties/sql"}
+        "sql": {"$ref": "#/$defs/UnattendedPseudoIngestRequest/properties/sql"},
+        "post_process": {"$ref": "#/$defs/UnattendedPseudoIngestRequest/properties/post_process"}
       },
       "required": ["cluster", "database", "sql"],
       "additionalProperties": false
