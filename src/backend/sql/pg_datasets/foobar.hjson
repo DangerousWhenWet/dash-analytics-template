@@ -1,0 +1,6 @@
+{
+    table_name: pg_foobar
+    cluster: localhost
+    database: foobar
+    sql: "SELECT * FROM my_table;"
+}

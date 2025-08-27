@@ -4,8 +4,8 @@ from typing import Optional, List
 
 import duckdb
 import pandas as pd
-import psycopg2 as pg
 
+from . import DuckDBMonitorMiddleware
 from .base import DUCKDB, POSTGRES, get_external_connection_detail, ignore_warnings
 
 class PostgresMonitorMiddleware:
@@ -25,7 +25,7 @@ class PostgresMonitorMiddleware:
     def get_dataframe(table_name:str, conn:Optional[duckdb.DuckDBPyConnection]=None) -> Optional[pd.DataFrame]:
         supplied_conn = conn is not None
         try:
-            conn = conn or duckdb.connect(DUCKDB.PATH, read_only=True)
+            conn = conn or duckdb.connect(DUCKDB.PATH, read_only=False)
             sql = """
                 --sql
                 SELECT etc
@@ -37,9 +37,9 @@ class PostgresMonitorMiddleware:
                 etc = json.loads(result[0])
                 POSTGRES.ETC_SCHEMA.validate(etc)
                 if detail := get_external_connection_detail('postgres', etc):
-                    print(detail)
+                    DuckDBMonitorMiddleware.log_table_usage([table_name], conn=conn)
                     with ignore_warnings(), detail.connect(etc['database']) as pg_conn:
-                        df = pd.read_sql(etc['query'], pg_conn)
+                        df = pd.read_sql(etc['sql'], pg_conn)
                         return df
         finally:
             if not supplied_conn:

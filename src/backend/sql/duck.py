@@ -7,7 +7,7 @@ import duckdb
 import pandas as pd
 import sqlparse
 
-from .base import DUCKDB
+from .base import DUCKDB, ignore_warnings
 
 
 class DuckDBMonitorMiddleware:
@@ -108,10 +108,10 @@ class DuckDBMonitorMiddleware:
             else:
                 with duckdb.connect(DUCKDB.PATH) as conn:
                     conn.execute(sql_upsert, params_upsert)
-        except duckdb.TransactionException:
+        except duckdb.TransactionException as e:
             # NOTE: with high concurrency on same record this can happen. e.g. multiple celery workers hitting on the same datasource.
             #       we are dealing with the problem by applying an Ostrich Algorithm ;)
-            pass
+            print(f"TransactionException in log_table_usage: {e.__class__.__name__}: {e}")
 
 
     @staticmethod
