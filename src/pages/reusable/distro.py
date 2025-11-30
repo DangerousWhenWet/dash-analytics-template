@@ -1,9 +1,11 @@
 #pylint: disable=missing-docstring, trailing-whitespace, line-too-long, multiple-statements, use-dict-literal, bare-except
+from __future__ import annotations
+from collections.abc import Hashable
 import datetime as dt
 import functools
 import itertools
 import traceback
-from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict, Generic, Iterable, TypeVar, Type
+from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict, Generic, Iterable, TypeVar, Type, TypeAlias
 
 from dateutil import parser as date_parser
 import dash
@@ -11,6 +13,7 @@ from dash import dcc, html, Input, Output, State
 from dash_iconify import DashIconify
 import dash_mantine_components as dmc
 import duckdb
+import numpy as np
 import pandas as pd
 from plotly.colors import qualitative as qualitative_color_scales, sequential as continuous_color_scales
 import plotly.graph_objects as go
@@ -18,7 +21,7 @@ from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field, ValidationError
 
 from backend.jobqueue import tasks
-from backend.sql import base, DuckDBMonitorMiddleware, PostgresMonitorMiddleware
+from backend.sql import base, DuckDBMonitorMiddleware
 from pages.utils.etc import make_prefixer
 from pages.utils.extended_page_registry import PageRegistryInput
 
@@ -45,7 +48,9 @@ AnyColorScale = Union[DiscreteColorScale, ContinuousColorScale]
 colorscale_map: Dict[str, List[str]] = \
     {k: getattr(qualitative_color_scales, k) for k in get_args(DiscreteColorScale)} | \
     {k: getattr(continuous_color_scales, k) for k in get_args(ContinuousColorScale)}
-
+X_ICON = 'emojione-monotone:letter-x'
+Y_ICON = 'emojione-monotone:letter-y'
+Z_ICON = 'emojione-monotone:letter-z'
 
 X = TypeVar('X')
 class SubscriptableCycle(Generic[X]):
@@ -61,12 +66,6 @@ class SubscriptableCycle(Generic[X]):
     
     def __iter__(self) -> Iterable[X]:
         return itertools.cycle(self.iterable)
-
-
-class PatternMatchIdType(TypedDict):
-    prefix: str
-    column: str
-    index: int
 
 
 class Column(BaseModel):
@@ -139,6 +138,9 @@ class PlotSettings(BaseModel):
     color_scale_name_discrete: Optional[DiscreteColorScale] = 'T10'
     color_scale_name_continuous: Optional[ContinuousColorScale] = 'thermal'
     filters: List["FilterUnionType"] = []
+    overlays: List["ConcreteOverlay"] = []
+    overlay_globally_enabled: bool = True
+    overlay_per_colorgroup_enabled: bool = False
 
     @property
     def color_scale_name(self) -> Optional[str]:
@@ -160,8 +162,11 @@ class PlotSettings(BaseModel):
         return SubscriptableCycle(colorscale_map[name]) if name else None
 
 
-class FilterPatternMatchIdType(PatternMatchIdType):
-    # keys: prefix, column, index, component
+class FilterPatternMatchIdType(TypedDict):
+    type: Literal['filter']
+    prefix: str
+    column: str
+    index: int
     component: Literal['negate', 'operator', 'enable', 'value', 'remove']
 
 class Filter(BaseModel):
@@ -741,6 +746,241 @@ FILTER_DTYPE_MAP = {
 }
 
 
+OverlayKind: TypeAlias = Literal[
+    'p10',
+    'q1',
+    'q2',
+    'q3',
+    'p90',
+
+    'mean',
+    'plus-1std',
+    'plus-2std',
+    'plus-3std',
+    'minus-1std',
+    'minus-2std',
+    'minus-3std',
+
+    'mode',
+    'min',
+    'max',
+]
+OverlayCategory: TypeAlias = Literal['Percentiles','Location & Scale','Extrema']
+OVERLAY_CATEGORY_ICONS: Dict[OverlayCategory, str] = {
+    'Percentiles': 'mdi:percent',
+    'Location & Scale': 'mdi:chart-bell-curve',
+    'Extrema': 'tdesign:chart-minimum',
+}
+SelectEntry = Dict[str, str]
+OverlayGroup = Dict[str, Union[str, List[SelectEntry]]]
+
+
+OverlayFunc = Callable[[pd.Series], Union[pd.Series, float]]
+
+
+class OverlaySpec(BaseModel):
+    kind: OverlayKind
+    label: str
+    label_brief: Optional[str] = None
+    category: OverlayCategory
+    _func: str
+
+    @property
+    def select_entry(self) -> Dict[str, str]:
+        return {'value': self.kind, 'label': self.label}
+    
+    @property
+    def func(self) -> OverlayFunc:
+        return OVERLAY_FUNCS[self.kind]
+    
+    @property
+    def annotation_text(self) -> str:
+        return self.label_brief or self.label
+
+
+def _p10(x: pd.Series) -> float:  return x.quantile(0.10)
+def _q1(x: pd.Series) -> float:   return x.quantile(0.25)
+def _q2(x: pd.Series) -> float:   return x.quantile(0.50)
+def _q3(x: pd.Series) -> float:   return x.quantile(0.75)
+def _p90(x: pd.Series) -> float:  return x.quantile(0.90)
+
+def _mean(x: pd.Series) -> float:        return x.mean()
+def _plus_1std(x: pd.Series) -> float:   return x.mean() + x.std()
+def _plus_2std(x: pd.Series) -> float:   return x.mean() + 2 * x.std()
+def _plus_3std(x: pd.Series) -> float:   return x.mean() + 3 * x.std()
+def _minus_1std(x: pd.Series) -> float:  return x.mean() - x.std()
+def _minus_2std(x: pd.Series) -> float:  return x.mean() - 2 * x.std()
+def _minus_3std(x: pd.Series) -> float:  return x.mean() - 3 * x.std()
+
+def _mode(x: pd.Series) -> float:
+    mode = x.mode()
+    if len(mode) == 0:    return float('nan')
+    elif len(mode) == 1:  return mode.iloc[0]
+    else:                  return mode.mean()
+def _min(x: pd.Series) -> float:   return x.min()
+def _max(x: pd.Series) -> float:   return x.max()
+
+OVERLAY_FUNCS: Dict[OverlayKind, OverlayFunc] = {
+    'p10': _p10,
+    'q1': _q1,
+    'q2': _q2,
+    'q3': _q3,
+    'p90': _p90,
+
+    'mean': _mean,
+    'plus-1std': _plus_1std,
+    'plus-2std': _plus_2std,
+    'plus-3std': _plus_3std,
+    'minus-1std': _minus_1std,
+    'minus-2std': _minus_2std,
+    'minus-3std': _minus_3std,
+
+    'mode': _mode,
+    'min': _min,
+    'max': _max
+}
+
+
+class OverlayPatternMatchIdType(TypedDict):
+    type: Literal['overlay']
+    prefix: str
+    axis: Literal['x', 'y', 'z']
+    kind: str
+    component: Literal['axis-icon', 'text', 'remove']
+
+
+class ConcreteOverlay(BaseModel):
+    spec: OverlaySpec
+    prefix: str
+    axis: Literal['x', 'y', 'z'] # which axis of the data this overlay applies to (the line is drawn orthogonal to this axis)
+    _flag_for_removal: bool = False
+
+    @staticmethod
+    def from_spec(ospec: OverlaySpec, axis: Literal['x', 'y', 'z'], prefix: str) -> 'ConcreteOverlay':
+        return ConcreteOverlay(prefix=prefix, spec=ospec, axis=axis)
+
+    @property
+    def dash_ids(self) -> OverlayPatternMatchIdType:
+        remove_id: OverlayPatternMatchIdType = {
+            'type': 'overlay',
+            'prefix': self.prefix,
+            'axis': self.axis,
+            'kind': self.spec.kind,
+            'component': 'remove',
+        }
+        return remove_id
+
+    @property
+    def layout(self):
+        # 1. x/y icon depending on self.axis
+        # 2. a label with an icon (depending on self.category) and the self.label text
+        # 3. a remove button
+        # based on the Filter widgets's layout styles
+        id_remove = self.dash_ids
+        axis_icon = {
+            'x': X_ICON,
+            'y': Y_ICON,
+            'z': Z_ICON,
+        }[self.axis]
+        category_icon = OVERLAY_CATEGORY_ICONS[self.spec.category]
+        return dmc.Card(
+            withBorder=True,
+            children=[
+                dmc.CardSection(children=[
+                    dmc.Group(
+                        wrap='nowrap',
+                        children=[
+                            DashIconify(
+                                icon=axis_icon,
+                                width=20,
+                                height=20,
+                            ),
+                            DashIconify(
+                                icon=category_icon,
+                                width=20,
+                                height=20,
+                            ),
+                            dmc.Text(
+                                children=self.spec.label,
+                                size='sm',
+                                fw='bold',
+                                truncate='end',
+                                flex=1,
+                                # make it look like a dmc.Code
+                                c="var(--mantine-color-text)", #type: ignore
+                                bg="var(--mantine-color-gray-1)", #type: ignore
+                                ff="monospace",
+                                px=1,
+                                py=1,
+                                style={"borderRadius": "4px", "border": "1px solid var(--mantine-color-gray-3)"},
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.ActionIcon(
+                                    DashIconify(icon='material-symbols:close', width=20, height=20),
+                                    id=id_remove, #type: ignore
+                                    variant='transparent',
+                                    size='xs',
+                                ),
+                                label="Remove overlay",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            )
+                        ]
+                    )
+                ])
+            ]
+        )
+        
+
+    def compute(self, x_ser: pd.Series, y_ser: pd.Series, bounds: Tuple[Hashable, Hashable]) -> Tuple[pd.Series, pd.Series]:
+        # accept x-trace and y-trace pd.Series's, apply func to the appropriate one, return a tuple of
+        # (x_overlay_series, y_overlay_series) where whichever axis is NOT the overlay is returned as-is.
+        # in the case where overlay function returns a single scalar value, replicate it twice at the min and max of the other axis
+        # for a two-point straight line spanning the entire other axis.
+
+        data = self.spec.func(x_ser if self.axis == 'x' else y_ser)
+        if isinstance(data, pd.Series):
+            return (
+                data if self.axis == 'x' else y_ser,
+                data if self.axis == 'y' else x_ser,
+            )
+        else: # single scalar float
+            x_ser = pd.Series([x_ser.min(), x_ser.max()])
+            y_ser = pd.Series([y_ser.min(), y_ser.max()])
+            return (
+                pd.Series([data, data]) if self.axis == 'x' else pd.Series(bounds),
+                pd.Series([data, data]) if self.axis == 'y' else pd.Series(bounds),
+            )
+
+
+    def mutate(self, callback_input:Dict[str, Any]):
+        component = callback_input['id']['component']
+        if component == 'remove':
+            self._flag_for_removal = True
+
+
+OVERLAY_SPECS: Dict[OverlayKind, OverlaySpec] = {
+    o.kind: o for o in [
+        OverlaySpec(kind='p10', label='10th Percentile', label_brief='P10', category='Percentiles', _func='_p10'),
+        OverlaySpec(kind='q1', label='1st Quartile (Q1)', label_brief='Q1', category='Percentiles', _func='_q1'),
+        OverlaySpec(kind='q2', label='Median (Q2)', label_brief='Q2', category='Percentiles', _func='_q2'),
+        OverlaySpec(kind='q3', label='3rd Quartile (Q3)', label_brief='Q3', category='Percentiles', _func='_q3'),
+        OverlaySpec(kind='p90', label='90th Percentile', label_brief='P90', category='Percentiles', _func='_p90'),
+        OverlaySpec(kind='mean', label='Mean', label_brief='x̄', category='Location & Scale', _func='_mean'),
+        OverlaySpec(kind='plus-1std', label='Mean + 1 Std Dev', label_brief='x̄ + 1s', category='Location & Scale', _func='_plus_1std'),
+        OverlaySpec(kind='plus-2std', label='Mean + 2 Std Dev', label_brief='x̄ + 2s', category='Location & Scale', _func='_plus_2std'),
+        OverlaySpec(kind='plus-3std', label='Mean + 3 Std Dev', label_brief='x̄ + 3s', category='Location & Scale', _func='_plus_3std'),
+        OverlaySpec(kind='minus-1std', label='Mean - 1 Std Dev', label_brief='x̄ - 1s', category='Location & Scale', _func='_minus_1std'),
+        OverlaySpec(kind='minus-2std', label='Mean - 2 Std Dev', label_brief='x̄ - 2s', category='Location & Scale', _func='_minus_2std'),
+        OverlaySpec(kind='minus-3std', label='Mean - 3 Std Dev', label_brief='x̄ - 3s', category='Location & Scale', _func='_minus_3std'),
+        OverlaySpec(kind='mode', label='Mode', category='Extrema', _func='_mode'),
+        OverlaySpec(kind='min', label='Minimum', label_brief='Min', category='Extrema', _func='_min'),
+        OverlaySpec(kind='max', label='Maximum', label_brief='Max', category='Extrema', _func='_max'),
+    ]
+}
+
+
 def make_tab_close_button(tab_id:Dict[str, Any]):
     return dmc.ActionIcon(
         DashIconify(
@@ -990,7 +1230,7 @@ class Distro:
                         radius='xs',
                         children=[
                             dmc.Select(
-                                leftSection=DashIconify(icon='emojione-monotone:letter-x', width=20,height=20),
+                                leftSection=DashIconify(icon=X_ICON, width=20,height=20),
                                 leftSectionPointerEvents='none',
                                 id=self._p('x-column-select'),
                                 data=col_dtyped_keys, #type:ignore
@@ -999,7 +1239,7 @@ class Distro:
                                 renderOption={'function': "renderSelectOptionDtypeRight"},
                             ),
                             dmc.Select(
-                                leftSection=DashIconify(icon='emojione-monotone:letter-y', width=20,height=20),
+                                leftSection=DashIconify(icon=Y_ICON, width=20,height=20),
                                 leftSectionPointerEvents='none',
                                 id=self._p('y-column-select'),
                                 data=col_dtyped_keys, #type:ignore
@@ -1008,13 +1248,46 @@ class Distro:
                                 renderOption={'function': "renderSelectOptionDtypeRight"},
                             ),
                             dmc.Select(
-                                leftSection=DashIconify(icon='emojione-monotone:letter-z', width=20,height=20),
+                                leftSection=DashIconify(icon=Z_ICON, width=20,height=20),
                                 leftSectionPointerEvents='none',
                                 id=self._p('z-column-select'),
                                 data=col_dtyped_keys, #type:ignore
                                 value=col_dtyped_keys[2]['value'] if len(col_dtyped_keys) > 1 else None,
                                 clearable=False,
                                 renderOption={'function': "renderSelectOptionDtypeRight"},
+                            ),
+                        ]
+                    ),
+                    dmc.Fieldset(
+                        legend=dmc.Text('Binning:', fw=700), #type:ignore
+                        variant='filled',
+                        radius='xs',
+                        children=[
+                            dmc.Select(
+                                leftSection=DashIconify(icon=X_ICON, width=20,height=20),
+                                leftSectionPointerEvents='none',
+                                id=self._p('x-binning-select'),
+                                data=[
+                                    {'value': 'none', 'label': 'None'},
+                                    {'value': 'n-equal', 'label': '"n" Equal-Width Bins'},
+                                    {'value': 'n-freq', 'label': '"n" Equal-Frequency Bins'},
+                                    {'value': 'pct', 'label': 'Percentiles'},
+                                ], #type:ignore
+                                value='none',
+                                clearable=False,
+                            ),
+                            dmc.Select(
+                                leftSection=DashIconify(icon=Y_ICON, width=20,height=20),
+                                leftSectionPointerEvents='none',
+                                id=self._p('y-binning-select'),
+                                data=[
+                                    {'value': 'none', 'label': 'None'},
+                                    {'value': 'n-equal', 'label': '"n" Equal-Width Bins'},
+                                    {'value': 'n-freq', 'label': '"n" Equal-Frequency Bins'},
+                                    {'value': 'pct', 'label': 'Percentiles'},
+                                ], #type:ignore
+                                value='none',
+                                clearable=False,
                             ),
                         ]
                     ),
@@ -1151,11 +1424,70 @@ class Distro:
 
 
     def _tab_content_overlays(self, schema:DatasourceSchema): #pylint: disable=unused-argument
+        overlay_options: List[OverlayGroup] = [
+            {
+                'group': category,
+                'items': [ospec.select_entry for ospec in OVERLAY_SPECS.values() if ospec.category == category]
+            }
+            for category in cast(Tuple[str, ...],get_args(OverlayCategory))
+        ]
+
         return dmc.Box(
             id=dict(type=self._p('tab-content'), index=self._tab_values.index('tab-overlays')),
+            p=2,
             children=[
                 make_tab_close_button(dict(type=self._p('close-tab'), index='tab-overlays')),
-                dmc.Text("Overlays")
+                dmc.Group(
+                    children=[
+                        dmc.Select(
+                            id=self._p('select-overlay'),
+                            data=overlay_options, #type:ignore
+                            value=None,
+                            placeholder="Pick an overlay",
+                            clearable=False,
+                            searchable=True,
+                            flex=1,
+                        ),
+                        #toggle switch for X/Y axis
+                        dmc.Switch(
+                            id=self._p('toggle-overlay-axis'),
+                            offLabel=DashIconify(icon=X_ICON, width=15,height=15),
+                            onLabel=DashIconify(icon=Y_ICON, width=15,height=15),
+                            checked=True
+                        ),
+                        dmc.ActionIcon(
+                            DashIconify(icon='icons8:plus', width=20, height=20),
+                            id=self._p('add-overlay'),
+                            size='sm',
+                        ),
+                    ],
+                ),
+                dmc.Group(
+                    children=[
+                        dmc.Checkbox(
+                            id=self._p('overlay-globally'),
+                            label="Overlay Globally",
+                            checked=True,
+                            size='xs',
+                            icon=DashIconify(icon='streamline:graph', ),
+                        ),
+                        dmc.Checkbox(
+                            id=self._p('overlay-per-colorgroup'),
+                            label="Overlay Per Color Group",
+                            checked=False,
+                            size='xs',
+                            icon=DashIconify(icon='streamline-ultimate:analytics-graph-lines-2', ),
+                        ),
+                    ]
+                ),
+                dmc.Divider(my=4),
+                dmc.Center(dmc.Button(
+                        "Clear Overlays",
+                        id=self._p('clear-overlays'),
+                        leftSection=DashIconify(icon='carbon:erase', width=20, height=20),
+                        color='red',
+                ), mb=2),
+                dmc.Box(id=self._p('overlays'), children=[], p=2),
             ]
         )
 
@@ -1239,7 +1571,14 @@ class Distro:
         plot_settings = PlotSettings(**plot_settings) if plot_settings is not None else PlotSettings()
         #print(f"_populate_filters({plot_settings=})") #<-- plot_settings.filters now contains only base Filter objects
         return [f.layout for f in plot_settings.filters]
-        
+    
+
+    # CALLBACK, triggered by modification of PlotSettings (specifically we care about plot_settings.overlays)
+    #           modifies the contents of the overlays dmc.Box
+    def _populate_overlays(self, plot_settings):
+        plot_settings = PlotSettings(**plot_settings) if plot_settings is not None else PlotSettings()
+        #print(f"_populate_overlays({plot_settings=})") #<-- plot_settings.overlays now contains only base Overlay objects
+        return [o.layout for o in plot_settings.overlays]
 
 
     # CALLBACK, triggered by clicking any tab
@@ -1310,8 +1649,10 @@ class Distro:
                 columns,
                 dimensionality,
                 colorization,
-                global_filter_control,
+                filter_control,
                 individual_filter_controls, #pylint: disable=unused-argument
+                overlay_control,
+                individual_overlay_controls, #pylint: disable=unused-argument
                 plot_settings,
                 schema,
                 dimensionality_controls #pylint: disable=unused-argument
@@ -1354,15 +1695,15 @@ class Distro:
 
         # ===== "Filters" tab ======
         # global filter controls
-        if trig_id == self._p('add-filter') and global_filter_control['selected_filter_field'] is not None:
-            field, dtype = global_filter_control['selected_filter_field'].split('<<')
+        if trig_id == self._p('add-filter') and filter_control['selected_filter_field'] is not None:
+            field, dtype = filter_control['selected_filter_field'].split('<<')
             dtype = dtype[:-2] if dtype.endswith('>>') else dtype
             FilterType: Type[FilterUnionType] = FILTER_DTYPE_MAP[dtype] #pylint: disable=invalid-name
             #print(f"{field=}, {dtype=}, {FilterType=}")
             plot_settings.filters.append(FilterType(
                 column=field,
                 prefix=self._p(''),
-                index=global_filter_control['add_filter'], #n-clicks
+                index=filter_control['add_filter'], #n-clicks
                 **schema.get_column(field).etc #type: ignore
             ))
         # individual filter controls
@@ -1395,6 +1736,48 @@ class Distro:
                         if f._flag_for_removal: #pylint: disable=protected-access
                             print(f"DESTROYING {f=}")
                             plot_settings.filters.remove(f)
+
+
+        # ===== "Overlays" tab ======
+        # global overlay controls
+        if trig_id == self._p('add-overlay') and overlay_control['selected_overlay'] is not None:
+            key = overlay_control['selected_overlay']
+            overlay_spec = OVERLAY_SPECS[key]
+            axis = 'y' if overlay_control['toggle_overlay_axis'] else 'x'
+            plot_settings.overlays.append(ConcreteOverlay.from_spec(overlay_spec, axis, self._p('')))
+        elif trig_id == self._p('overlay-globally'):
+            plot_settings.overlay_globally_enabled = overlay_control['overlay_globally']
+        elif trig_id == self._p('overlay-per-colorgroup'):
+            plot_settings.overlay_per_colorgroup_enabled = overlay_control['overlay_per_colorgroup']
+        elif not isinstance(trig_id, str):
+            trig_id = cast(Mapping[str, Any], trig_id)
+            if trig_id.get('type') == 'overlay':
+                # 1. obtain input dict of the overlay who triggered this callback
+                # dash.callback_context.inputs_list is List[Union[Dict[str, Any], List[Dict[str, Any]]]]
+                # we need to flatten it in order to seek the input that triggered the callback
+                trig_input: Optional[Dict[str, Any]] = next(
+                    (x for x in itertools.chain.from_iterable(
+                        item if isinstance(item, list) else [item] 
+                        for item in dash.callback_context.inputs_list
+                    ) if x['id'] == trig_id),
+                    None
+                )
+                print(f"{trig_input=}")
+                # 2. obtain corresponding pydantic model for that dict
+                corresponding_overlay: Optional[ConcreteOverlay] = next(
+                    (o for o in plot_settings.overlays if all((
+                        o.spec.kind == trig_id['kind'],
+                        o.axis == trig_id['axis'],
+                    ))),
+                    None
+                )
+                print(f"{corresponding_overlay=}")
+                if trig_input is not None and corresponding_overlay is not None:
+                    corresponding_overlay.mutate(trig_input)
+                    for o in plot_settings.overlays:
+                        if o._flag_for_removal: #pylint: disable=protected-access
+                            print(f"DESTROYING {o=}")
+                            plot_settings.overlays.remove(o)
 
 
         return {
@@ -1449,6 +1832,8 @@ class Distro:
             )
             discrete_colorscale = plot_settings.get_color_scale(name=plot_settings.color_scale_name_discrete)
             continuous_color_scale = plot_settings.get_color_scale(name=plot_settings.color_scale_name_continuous).iterable #type:ignore
+            assert discrete_colorscale is not None
+            assert continuous_color_scale is not None
 
             for i, category in enumerate(ser_color_group.cat.categories):
                 group_df = df[ser_color_group == category]
@@ -1507,7 +1892,7 @@ class Distro:
                             name=str(category), legendgroup=str(category),
                             marker=dict(
                                 opacity=0.5,
-                                color=discrete_colorscale[i] if plot_settings.color_enabled and plot_settings.color_column_type == 'continuous' else discrete_colorscale[0] #type:ignore
+                                color=discrete_colorscale[i] if plot_settings.color_enabled and plot_settings.color_column_type == 'discrete' else discrete_colorscale[0] #type:ignore
                             ), 
                             showlegend=False
                         ),
@@ -1515,6 +1900,91 @@ class Distro:
                     )
                 else:
                     raise NotImplementedError("3D plotting is not yet implemented.")
+
+
+            # ===== Overlays =====
+            for overlay in plot_settings.overlays:
+                # do global overlays
+                if plot_settings.overlay_globally_enabled:
+                    #group_x = group_df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=group_df.index)
+                    ser_x = df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=df.index)
+                    ser_y = df[plot_settings.y_column] if plot_settings.y_column else pd.Series(dtype='float', index=df.index)
+                    global_bounds = (ser_y.min(), ser_y.max()) if overlay.axis == 'x' else (ser_x.min(), ser_x.max())
+                    ovr_ser_x, ovr_ser_y = overlay.compute(ser_x, ser_y, global_bounds)
+
+                    fig.add_trace(
+                        go.Scatter(
+                            x=ovr_ser_x, y=ovr_ser_y,
+                            mode='lines',
+                            line = dict(
+                                color='black',
+                                width=1,
+                                dash='dash',
+                            ),
+                            name=f"{overlay.spec.label} (global)",
+                            showlegend=False,
+                        ),
+                        row=2, col=1
+                    )
+                    annotation_text = f"<b>{overlay.spec.annotation_text}</b> <span style='color:black;'>■</span> <i>(global)</i>"
+                    text_x, text_y = ovr_ser_x.iloc[-1], ovr_ser_y.iloc[-1]
+                    fig.add_annotation(
+                        x=text_x, y=text_y,
+                        text=annotation_text,
+                        showarrow=False,
+                        xanchor='right',
+                        yanchor='bottom' if overlay.axis == 'y' else 'top',
+                        textangle=0 if overlay.axis == 'y' else 270,
+                        font=dict(
+                            color='black',
+                            size=12,
+                        ),
+                        row=2, col=1
+                    )
+                # do per-color-group overlays
+                print(f"{plot_settings.overlay_per_colorgroup_enabled=}, {plot_settings.color_enabled=}, {plot_settings.color_column_type=}")
+                if plot_settings.overlay_per_colorgroup_enabled and plot_settings.color_enabled and plot_settings.color_column_type == 'discrete':
+                    for i, category in enumerate(ser_color_group.cat.categories):
+                        global_ser_x = df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=df.index)
+                        global_ser_y = df[plot_settings.y_column] if plot_settings.y_column else pd.Series(dtype='float', index=df.index)
+                        global_bounds = (global_ser_y.min(), global_ser_y.max()) if overlay.axis == 'x' else (global_ser_x.min(), global_ser_x.max())
+
+                        group_df = df[ser_color_group == category]
+                        ser_x = group_df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=group_df.index)
+                        ser_y = group_df[plot_settings.y_column] if plot_settings.y_column else pd.Series(dtype='float', index=group_df.index)
+                        ovr_ser_x, ovr_ser_y = overlay.compute(ser_x, ser_y, global_bounds)
+
+                        fig.add_trace(
+                            go.Scatter(
+                                x=ovr_ser_x, y=ovr_ser_y,
+                                mode='lines',
+                                line = dict(
+                                    color=discrete_colorscale[i],
+                                    width=1,
+                                    dash='dash',
+                                ),
+                                name=f"{overlay.spec.label} ({category})",
+                                showlegend=False,
+                            ),
+                            row=2, col=1
+                        )
+                        annotation_text = f"<b>{overlay.spec.annotation_text}</b> <span style='color:{discrete_colorscale[i]};'>■</span> <i>({category})</i>"
+                        text_x, text_y = ovr_ser_x.iloc[-1], ovr_ser_y.iloc[-1]
+                        fig.add_annotation(
+                            x=text_x, y=text_y,
+                            text=annotation_text,
+                            showarrow=False,
+                            xanchor='right',
+                            yanchor='bottom' if overlay.axis == 'y' else 'top',
+                            textangle=0 if overlay.axis == 'y' else 270,
+                            font=dict(
+                                color='black',
+                                size=12,
+                            ),
+                            row=2, col=1
+                        )
+
+
 
             fig.update_layout(
                 title=f"<b>{table_name}:</b> {plot_settings.y_column} vs. {plot_settings.x_column}",
@@ -1591,6 +2061,14 @@ class Distro:
 
             prevent_initial_call=True
         )(self._populate_filters)
+
+
+        dash.callback(
+            Output(self._p('overlays'), 'children', allow_duplicate=True),
+            Input(self._p('plot-settings'), 'data'),
+
+            prevent_initial_call=True
+        )(self._populate_overlays)
 
 
         dash.callback(
@@ -1671,17 +2149,27 @@ class Distro:
                     discrete_scale=Input(self._p('color-scale-discrete-select'), 'value'),
                     continuous_scale=Input(self._p('color-scale-continuous-select'), 'value'),
                 ),
-                'global_filter_control': {
+                'filter_control': {
                     'selected_filter_field': Input(self._p('select-filter-field'), 'value'),
                     'add_filter': Input(self._p('add-filter'), 'n_clicks'),
                     'clear_filters': Input(self._p('clear-filters'), 'n_clicks'),
                 },
                 'individual_filter_controls': {
-                    'negate': Input(dict(type='filter',  prefix=self._p(''), component='negate', column=dash.ALL, index=dash.ALL), 'checked'),
+                    'negate': Input(dict(  type='filter', prefix=self._p(''), component='negate',   column=dash.ALL, index=dash.ALL), 'checked'),
                     'operator': Input(dict(type='filter', prefix=self._p(''), component='operator', column=dash.ALL, index=dash.ALL), 'value'),
-                    'enable': Input(dict(type='filter',  prefix=self._p(''), component='enable', column=dash.ALL, index=dash.ALL), 'checked'),
-                    'value': Input(dict(type='filter',  prefix=self._p(''), component='value', column=dash.ALL, index=dash.ALL), 'value'),
-                    'remove': Input(dict(type='filter',  prefix=self._p(''), component='remove', column=dash.ALL, index=dash.ALL), 'n_clicks'),
+                    'enable': Input(dict(  type='filter', prefix=self._p(''), component='enable',   column=dash.ALL, index=dash.ALL), 'checked'),
+                    'value': Input(dict(   type='filter', prefix=self._p(''), component='value',    column=dash.ALL, index=dash.ALL), 'value'),
+                    'remove': Input(dict(  type='filter', prefix=self._p(''), component='remove',   column=dash.ALL, index=dash.ALL), 'n_clicks'),
+                },
+                'overlay_control': {
+                    'selected_overlay': Input(self._p('select-overlay'), 'value'),
+                    'toggle_overlay_axis': Input(self._p('toggle-overlay-axis'), 'checked'),
+                    'add_overlay': Input(self._p('add-overlay'), 'n_clicks'),
+                    'overlay_globally': Input(self._p('overlay-globally'), 'checked'),
+                    'overlay_per_colorgroup': Input(self._p('overlay-per-colorgroup'), 'checked'),
+                },
+                'individual_overlay_controls': {
+                    'remove': Input(dict(  type='overlay', prefix=self._p(''), component='remove',   axis=dash.ALL, kind=dash.ALL), 'n_clicks'),
                 },
             },
             state=dict(
