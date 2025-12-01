@@ -1,15 +1,18 @@
-#pylint: disable=missing-docstring, trailing-whitespace, line-too-long, multiple-statements, use-dict-literal, bare-except
 from __future__ import annotations
+#pylint: disable=missing-docstring, trailing-whitespace, line-too-long, multiple-statements, use-dict-literal, bare-except
+
+from abc import ABC, abstractmethod
 from collections.abc import Hashable
 import datetime as dt
 import functools
 import itertools
 import traceback
-from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict, Generic, Iterable, TypeVar, Type, TypeAlias
+from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict, NotRequired, Generic, Iterable, TypeVar, Type, TypeAlias
 
 from dateutil import parser as date_parser
 import dash
 from dash import dcc, html, Input, Output, State
+import dash.development.base_component as dash_devbase
 from dash_iconify import DashIconify
 import dash_mantine_components as dmc
 import duckdb
@@ -68,6 +71,23 @@ class SubscriptableCycle(Generic[X]):
         return itertools.cycle(self.iterable)
 
 
+class CallbackDeclarationSpec:
+    def __init__(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        # positional / keyword args to dash.callback
+        self.args: Tuple[Any, ...] = args
+        self.kwargs: Dict[str, Any] = kwargs
+        self.func = func
+
+    def register(self) -> None:
+        dash.callback(*self.args, **self.kwargs)(self.func)
+
+
+
 class Column(BaseModel):
     key: str
     dtype: DtypeType
@@ -89,7 +109,7 @@ class DatasourceSchema(BaseModel):
         return bool(self.columns)
 
     @staticmethod
-    def from_df(data_name:str, data_df:pd.DataFrame) -> 'DatasourceSchema':
+    def from_df(data_name:str, data_df:pd.DataFrame) -> DatasourceSchema:
         print(f"DatasourceSchema.from_df({data_name=}, {data_df.dtypes=})")
         #which_type = lambda col: str(data_df[col].dtype) if pd.api.types.is_numeric_dtype(data_df[col]) else ('category' if isinstance(data_df[col].dtype, pd.CategoricalDtype) else 'str')
         def which_type(col:str, data_df=data_df) -> DtypeType:
@@ -127,11 +147,20 @@ class DatasourceSchema(BaseModel):
         key = key.split('<<')[0]
         return next((col for col in self.columns if col.key == key), None)
 
+
+
+
+
 class PlotSettings(BaseModel):
+    prefix: str # get this from the Distro owner object; it's a prefix applied to dash component ID's within this distro instance to make them unique across the entire application
     x_column: Optional[str] = None
     y_column: Optional[str] = None
     z_column: Optional[str] = None
     dimensionality: Literal['2d', '3d'] = '2d'
+    x_binfuncs: Dict[BinKind, BinningUnionType] = Field(default_factory=dict)
+    y_binfuncs: Dict[BinKind, BinningUnionType] = Field(default_factory=dict)
+    x_selected_binfunc: BinKind = 'none'
+    y_selected_binfunc: BinKind = 'none'
     color_enabled: bool = False
     color_column: Optional[str] = None
     color_column_type: Optional[Literal['discrete', 'continuous']] = 'discrete'
@@ -160,6 +189,20 @@ class PlotSettings(BaseModel):
     def get_color_scale(self, name:Optional[str]=None) -> Optional[SubscriptableCycle[str]]:
         name = name or self.color_scale_name
         return SubscriptableCycle(colorscale_map[name]) if name else None
+    
+    def construct_binning_functions(self, axis: Literal['x','y']) -> Dict[BinKind, BinningUnionType]:
+        return {
+            'none': NoOpBinningFunction(prefix=self.prefix, axis=axis),
+            'n-bins': NBinsBinningFunction(prefix=self.prefix, n_bins=10, axis=axis),
+            
+        }
+    
+    def model_post_init(self, __context: Any) -> None: #pylint: disable=arguments-differ
+        if not self.x_binfuncs:
+            self.x_binfuncs = self.construct_binning_functions('x')
+        if not self.y_binfuncs:
+            self.y_binfuncs = self.construct_binning_functions('y')
+
 
 
 class FilterPatternMatchIdType(TypedDict):
@@ -981,6 +1024,177 @@ OVERLAY_SPECS: Dict[OverlayKind, OverlaySpec] = {
 }
 
 
+
+BinKind: TypeAlias = Literal['none', 'n-bins', 'n-freq', 'quart', 'dec']
+
+class BinningFunctionDashIds(TypedDict):
+    display_container: str
+    # must have at minimum a 'display_container' key for the visibility-toggleable containing component id, but can have
+    # any number of other arbitrary keys for other component ids as needed by specific binning functions.
+    #
+    # this TypedDict is extremely tightly coupled to all subclasses of BinningFunction
+    # this is an unfortunate limitation of TypedDicts, which will be rectified in the future (Python 3.15+) by
+    # PEP 728, which allows for declaring "open" TypedDicts that can still accept abritrary extra keys of a particular type.
+    # the below keys all can be removed if ever migrate to a Python with PEP 728 support.
+    n_bins: NotRequired[str]
+
+
+class BinningFunction(BaseModel, ABC):
+    kind: Any #not really Any, but one of BinKind. specific subclasses will set this to a Literal of a specific BinKind value.
+    label: ClassVar[str]
+    prefix: str
+    axis: Literal['x','y']
+
+    @abstractmethod
+    def bin(self, ser: pd.Series) -> pd.Series: ...
+
+    def mutate(self, callback_input:Dict[str, Any]) -> None:
+        """Mutate internal state based on a callback input dict."""
+        pass
+
+    # ---------- STATIC / CLASS API FOR WIRING ----------
+    @classmethod
+    def get_select_entries(cls, kind: BinKind) -> Dict[str, str]:
+        """Get the select entry dict for this binning function kind."""
+        return {'value': kind, 'label': cls.label}
+    
+    @classmethod
+    def get_dash_ids_static(
+        cls,
+        prefix: str,
+        kind: Any,
+        axis: Literal['x','y'],
+    ) -> BinningFunctionDashIds:
+        """
+        Compute IDs for wiring/layout without needing an instance.
+        Default implementation can delegate to the same scheme as the instance one.
+        """
+        return {"display_container": f"{prefix}-binning-{kind}-{axis}-display"}
+
+    @classmethod
+    def layout(cls, prefix: str, axis: Literal['x','y']) -> dash_devbase.Component:
+        """
+        Compute layout without needing an instance.
+        Default implementation can delegate to the instance method.
+        """
+        return dmc.Text(
+            "Abstract BinningFunction has no layout! Subclasses must implement `layout(prefix, axis)` method.`",
+            style={"color": "red"}
+        )
+    
+    @classmethod
+    def manage_visibility(cls, kind:Any, selected_kind: str) -> Dict[str, Any]:
+        return set_visibility({}, visible=(selected_kind == kind), visible_style='flex')
+
+    @classmethod
+    def callbacks(cls, prefix: str) -> List[CallbackDeclarationSpec]:
+        """
+        Subclasses override this to declare additional callbacks
+        (e.g. for controls like n_bins). Default: none.
+        """
+        return []
+
+    @classmethod
+    def register_callbacks(cls, prefix: str, kind: Any) -> None:
+        """Register all callbacks for this binning kind (visibility + extras)."""
+
+        # 1) Visibility callbacks for both axes
+        print(f"Registering binning function callbacks for kind '{kind}' of class '{cls.__name__}' with prefix '{prefix}'")
+        for axis in ('x', 'y'):
+            ids = cls.get_dash_ids_static(prefix, kind, axis)
+            select_id = f"{prefix}{axis}-binning-select"
+
+            dash.callback(
+                Output(ids['display_container'], 'style'),
+                Input(select_id, 'value'),
+            )(lambda selected_kind, kind=kind: cls.manage_visibility(kind, selected_kind))
+
+        # 2) Any subclass-specific callbacks
+        for cb_spec in cls.callbacks(prefix):
+            cb_spec.register()
+        
+
+
+
+NOOP_KIND: BinKind = 'none'
+class NoOpBinningFunction(BinningFunction):
+    kind: Literal['none'] = NOOP_KIND
+    label: ClassVar[str] = 'No Binning'
+
+    def bin(self, ser: pd.Series) -> pd.Series:
+        return ser
+
+    @classmethod
+    def layout(cls, prefix: str, axis: Literal['x','y']) -> dash_devbase.Component:
+        ids = cls.get_dash_ids_static(prefix, NOOP_KIND, axis)
+        return dmc.Group(
+            id=ids['display_container'],
+            children=[dmc.Text("No binning applied.", size='xs')]
+        )
+    
+
+
+NBINS_KIND: BinKind = 'n-bins'
+class NBinsBinningFunction(BinningFunction):
+    kind: Literal['n-bins'] = NBINS_KIND
+    label: ClassVar[str] = 'Fixed Number of Bins'
+    n_bins: int = 10
+
+    def bin(self, ser: pd.Series) -> pd.Series:
+        return pd.cut(ser, bins=self.n_bins)
+
+    def mutate(self, callback_input:Dict[str, Any]) -> None:
+        ids = self.get_dash_ids_static(self.prefix, NBINS_KIND, self.axis)
+        if callback_input['id'] == ids.get('n_bins'):
+            self.n_bins = callback_input['value']
+
+    @classmethod
+    def get_dash_ids_static(cls, prefix: str, kind: Any, axis: Literal['x','y']) -> BinningFunctionDashIds:
+        return BinningFunctionDashIds(
+            display_container=f"{prefix}-binning-{kind}-{axis}-display",
+            n_bins=f"{prefix}-binning-{kind}-{axis}-n-bins",
+        )
+
+    @classmethod
+    def layout(cls, prefix: str, axis: Literal['x','y']) -> dash_devbase.Component:
+        ids = cls.get_dash_ids_static(prefix, 'n-bins', axis)
+        return dmc.Group(
+            wrap='nowrap',
+            id=ids['display_container'],
+            children=[
+                DashIconify(icon="ant-design:number-outlined", width=16, height=16, style={'color': 'var(--mantine-color-dimmed)', 'marginLeft': '4px'}),
+                dmc.NumberInput(
+                    id=ids.get('n_bins'),
+                    value=10,
+                    min=2,
+                    step=1,
+                    size='xs',
+                    w='100%',
+                    hideControls=True,
+                    stepHoldDelay=500,
+                    stepHoldInterval=100,
+                )
+            ]
+        )
+
+
+BinningUnionType = Annotated[
+    Union[
+        NoOpBinningFunction,
+        NBinsBinningFunction,
+        # NFreqBinningFunction,
+        # QuartileBinningFunction,
+        # DecileBinningFunction,
+    ],
+    Field(discriminator='kind'),
+]
+
+
+BINFUNC_REGISTRY: Dict[BinKind, Type[BinningFunction]] = {
+    'none': NoOpBinningFunction,
+    'n-bins': NBinsBinningFunction,
+}
+
 def make_tab_close_button(tab_id:Dict[str, Any]):
     return dmc.ActionIcon(
         DashIconify(
@@ -1267,28 +1481,23 @@ class Distro:
                                 leftSection=DashIconify(icon=X_ICON, width=20,height=20),
                                 leftSectionPointerEvents='none',
                                 id=self._p('x-binning-select'),
-                                data=[
-                                    {'value': 'none', 'label': 'None'},
-                                    {'value': 'n-equal', 'label': '"n" Equal-Width Bins'},
-                                    {'value': 'n-freq', 'label': '"n" Equal-Frequency Bins'},
-                                    {'value': 'pct', 'label': 'Percentiles'},
-                                ], #type:ignore
+                                data=[binfunc.get_select_entries(kind) for kind, binfunc in BINFUNC_REGISTRY.items()], #type:ignore
                                 value='none',
                                 clearable=False,
                             ),
+                            *[binfunc.layout(self._p(''), 'x') for binfunc in BINFUNC_REGISTRY.values()],
+
+                            dmc.Divider(variant="solid", my=6),
+
                             dmc.Select(
                                 leftSection=DashIconify(icon=Y_ICON, width=20,height=20),
                                 leftSectionPointerEvents='none',
                                 id=self._p('y-binning-select'),
-                                data=[
-                                    {'value': 'none', 'label': 'None'},
-                                    {'value': 'n-equal', 'label': '"n" Equal-Width Bins'},
-                                    {'value': 'n-freq', 'label': '"n" Equal-Frequency Bins'},
-                                    {'value': 'pct', 'label': 'Percentiles'},
-                                ], #type:ignore
+                                data=[binfunc.get_select_entries(kind) for kind, binfunc in BINFUNC_REGISTRY.items()], #type:ignore
                                 value='none',
                                 clearable=False,
                             ),
+                            *[binfunc.layout(self._p(''), 'y') for binfunc in BINFUNC_REGISTRY.values()],
                         ]
                     ),
                     dmc.Fieldset(
@@ -1519,13 +1728,14 @@ class Distro:
             data_name, data_df = self._datasource_getter()
             schema = DatasourceSchema.from_df(data_name, data_df)
             plot_settings = PlotSettings(
+                prefix=self._p(''),
                 x_column=schema.columns[0].key,
                 y_column=schema.columns[1].key if len(schema.columns) > 1 else schema.columns[0].key
             )
             show_modal=False
         else:
             schema = DatasourceSchema(columns=[], name="No data")
-            plot_settings = PlotSettings()
+            plot_settings = PlotSettings(prefix=self._p(''),)
             show_modal=True
         
         return show_modal, schema.model_dump(), plot_settings.model_dump()
@@ -1543,6 +1753,7 @@ class Distro:
             data_df = cast(pd.DataFrame, connection.get_dataframe(table_name=table_name, duck_conn=duck_conn))
         schema = DatasourceSchema.from_df(table_name, data_df)
         plot_settings = PlotSettings(
+            prefix=self._p(''),
             x_column=schema.columns[0].key,
             y_column=schema.columns[1].key if len(schema.columns) > 1 else schema.columns[0].key
         )
@@ -1568,7 +1779,7 @@ class Distro:
     # CALLBACK, triggered by modification of PlotSettings (specifically we care about plot_settings.filters)
     #           modifies the contents of the filters dmc.Box
     def _populate_filters(self, plot_settings):
-        plot_settings = PlotSettings(**plot_settings) if plot_settings is not None else PlotSettings()
+        plot_settings = PlotSettings(**plot_settings) if plot_settings is not None else PlotSettings(prefix=self._p(''),)
         #print(f"_populate_filters({plot_settings=})") #<-- plot_settings.filters now contains only base Filter objects
         return [f.layout for f in plot_settings.filters]
     
@@ -1576,7 +1787,7 @@ class Distro:
     # CALLBACK, triggered by modification of PlotSettings (specifically we care about plot_settings.overlays)
     #           modifies the contents of the overlays dmc.Box
     def _populate_overlays(self, plot_settings):
-        plot_settings = PlotSettings(**plot_settings) if plot_settings is not None else PlotSettings()
+        plot_settings = PlotSettings(**plot_settings) if plot_settings is not None else PlotSettings(prefix=self._p(''),)
         #print(f"_populate_overlays({plot_settings=})") #<-- plot_settings.overlays now contains only base Overlay objects
         return [o.layout for o in plot_settings.overlays]
 
@@ -1648,6 +1859,7 @@ class Distro:
                 self,
                 columns,
                 dimensionality,
+                binning,
                 colorization,
                 filter_control,
                 individual_filter_controls, #pylint: disable=unused-argument
@@ -1657,18 +1869,9 @@ class Distro:
                 schema,
                 dimensionality_controls #pylint: disable=unused-argument
             ):
-        # print('='*80)
-        # print(f"_plot_settings_changed({columns=}, {dimensionality=}, {global_filter_control=}, {individual_filter_controls=}, {plot_settings=}, {schema=}, {dimensionality_controls=})")
-        # print(f"{dash.callback_context.triggered=}")
-        # print(f"{dash.callback_context.triggered_id=}")
-        # print(f"{type(dash.callback_context.triggered_id)=}")
-        # print(f"{dash.callback_context.inputs_list=}")
-        # print(f"{dash.callback_context.states_list=}")
-        # print(f"{dash.callback_context.states=}")
-        # print(f"{individual_filter_controls=}")
         
         trig_id = dash.callback_context.triggered_id
-        plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
+        plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings(prefix=self._p(''),)
         schema = DatasourceSchema(**schema) if schema is not None else DatasourceSchema(columns=[], name="No data")
 
         # ===== "Plot Settings" tab ======
@@ -1682,6 +1885,26 @@ class Distro:
         }
         plot_settings.x_column = columns['x'].split('<<')[0] if columns['x'] else None
         plot_settings.y_column = columns['y'].split('<<')[0] if columns['y'] else None
+        plot_settings.x_selected_binfunc = binning['x_selected']
+        plot_settings.y_selected_binfunc = binning['y_selected']
+        # manage binfunc param mutations for every binfunc
+        # if this callback was triggered by one of the binfunc's func-specific input widgets, send the relevant inputs for this trig_id to the binfunc's mutate method
+        active_x_binfunc = plot_settings.x_binfuncs[plot_settings.x_selected_binfunc]
+        active_y_binfunc = plot_settings.y_binfuncs[plot_settings.y_selected_binfunc]
+        for axis in ('x', 'y'):
+            active_binfunc = active_x_binfunc if axis == 'x' else active_y_binfunc
+            binfunc_dash_ids = active_binfunc.get_dash_ids_static(self._p(''), plot_settings.x_selected_binfunc if axis == 'x' else plot_settings.y_selected_binfunc, axis)
+            if trig_id in binfunc_dash_ids.values():
+                
+                trig_input: Optional[Dict[str, Any]] = next(
+                    (x for x in itertools.chain.from_iterable(
+                        item if isinstance(item, list) else [item] 
+                        for item in dash.callback_context.inputs_list
+                    ) if x['id'] == trig_id),
+                    None
+                )
+                if trig_input is not None:
+                    active_binfunc.mutate(trig_input)
         if colorization['column'] is None:
             plot_settings.color_enabled = False
             plot_settings.color_column = None
@@ -1791,7 +2014,7 @@ class Distro:
     def _update_graph(self, use_dark_mode, plot_settings, schema):
         print(f"_update_graph({use_dark_mode=},   {plot_settings=},   {schema=})")
         try:
-            plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings()
+            plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings(prefix=self._p(''),)
             schema = DatasourceSchema(**schema) if schema else DatasourceSchema(columns=[], name="No data")
             if schema.has_data is False:
                 #print("_update_graph() -> schema.has_data is False")
@@ -2015,6 +2238,7 @@ class Distro:
                 print(f"  -> {plot_settings=}")
             err_text = "An error has occurred.<br><br>" + str(e.__class__.__name__) + ': ' + str(e).replace('\n', '<br>')
             err_text += '<br><br>' + traceback_text
+            raise e
             err_fig = error_figure(use_dark_mode, err_text)
             return err_fig
 
@@ -2092,6 +2316,13 @@ class Distro:
             prevent_initial_call=True,
         )(self._deactivate_tabs)
 
+        
+
+        # build ephemeral/prototypical binfuncs just for purposes of wiring/layout. basically we just need any instance to use its `register_callbacks()` method
+        for kind, binfunc_cls in BINFUNC_REGISTRY.items():
+            binfunc_cls.register_callbacks(self._p(''), kind)
+
+
 
         dash.callback(
             output={
@@ -2143,6 +2374,16 @@ class Distro:
             inputs={
                 'columns': dict(x=Input(self._p('x-column-select'), 'value'), y=Input(self._p('y-column-select'), 'value')),
                 'dimensionality': Input(self._p('dimensionality'), 'value'),
+                'binning': {
+                    'x_selected': Input(self._p('x-binning-select'), 'value'),
+                    'x_binner_params': {
+                        'n_bins': Input(BINFUNC_REGISTRY['n-bins'].get_dash_ids_static(self._p(''), 'n-bins', 'x')['n_bins'], 'value'), #type: ignore
+                    },
+                    'y_selected': Input(self._p('y-binning-select'), 'value'),
+                    'y_binner_params': {
+                        'n_bins': Input(BINFUNC_REGISTRY['n-bins'].get_dash_ids_static(self._p(''), 'n-bins', 'y')['n_bins'], 'value'), #type: ignore
+                    },
+                },
                 'colorization': dict(
                     enabled=Input(self._p('color-enabled'), 'checked'),
                     column=Input(self._p('color-column-select'), 'value'),
