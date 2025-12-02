@@ -1,0 +1,52 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run Dev Environment",
+      "dependsOrder": "parallel",
+      "dependsOn": [
+        "Celery",
+        "Dash"
+      ],
+      "problemMatcher": []
+    },
+
+    {
+      "label": "Celery",
+      "type": "shell",
+      "command": "source ./.venv/bin/activate && cd src && python -m celery -A backend.jobqueue.worker worker --loglevel=info --pool=solo",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "/bin/bash",
+          "args": ["-l", "-c"]
+        }
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "panel": "new"
+      },
+      "problemMatcher": []
+    },
+
+    {
+      "label": "Dash",
+      "type": "shell",
+      "command": "source ./.venv/bin/activate && cd src && python -m app",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "/bin/bash",
+          "args": ["-l", "-c"]
+        }
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "panel": "new"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
