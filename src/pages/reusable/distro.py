@@ -1,11 +1,15 @@
+#pylint: disable=missing-docstring, trailing-whitespace, line-too-long, multiple-statements, use-dict-literal, bare-except, too-many-lines
 from __future__ import annotations
-#pylint: disable=missing-docstring, trailing-whitespace, line-too-long, multiple-statements, use-dict-literal, bare-except
+
+DEBUG = True
 
 from abc import ABC, abstractmethod
 from collections.abc import Hashable
+from dataclasses import dataclass
 import datetime as dt
 import functools
 import itertools
+import math
 import traceback
 from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict, NotRequired, Generic, Iterable, TypeVar, Type, TypeAlias
 
@@ -18,10 +22,12 @@ import dash_mantine_components as dmc
 import duckdb
 import numpy as np
 import pandas as pd
+from plotly.basedatatypes import BaseTraceType as PlotlyBaseTraceType
 from plotly.colors import qualitative as qualitative_color_scales, sequential as continuous_color_scales
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field, ValidationError
+import scipy.special
 
 from backend.jobqueue import tasks
 from backend.sql import base, DuckDBMonitorMiddleware
@@ -54,6 +60,7 @@ colorscale_map: Dict[str, List[str]] = \
 X_ICON = 'emojione-monotone:letter-x'
 Y_ICON = 'emojione-monotone:letter-y'
 Z_ICON = 'emojione-monotone:letter-z'
+
 
 X = TypeVar('X')
 class SubscriptableCycle(Generic[X]):
@@ -807,8 +814,14 @@ OverlayKind: TypeAlias = Literal[
     'mode',
     'min',
     'max',
+
+    'group-med-only',
+    'group-med-plusminus-minmax',
+    'group-mean-only',
+    'group-mean-plusminus-1std',
+    'group-boxwhisker',
 ]
-OverlayCategory: TypeAlias = Literal['Percentiles','Location & Scale','Extrema']
+OverlayCategory: TypeAlias = Literal['Percentiles','Location & Scale','Extrema', 'Groupwise']
 OVERLAY_CATEGORY_ICONS: Dict[OverlayCategory, str] = {
     'Percentiles': 'mdi:percent',
     'Location & Scale': 'mdi:chart-bell-curve',
@@ -816,9 +829,15 @@ OVERLAY_CATEGORY_ICONS: Dict[OverlayCategory, str] = {
 }
 SelectEntry = Dict[str, str]
 OverlayGroup = Dict[str, Union[str, List[SelectEntry]]]
+OverlayMode = Literal['line', 'errorbar', 'box']
 
+OverlayFuncOutputScalar = Tuple[float,...]
+OverlayFuncOutputSeries = Tuple[pd.Series,...]
+OverlayFuncOutput = Union[OverlayFuncOutputScalar, OverlayFuncOutputSeries]
 
-OverlayFunc = Callable[[pd.Series], Union[pd.Series, float]]
+OverlayFuncNatural = Callable[[pd.Series], Union[OverlayFuncOutputScalar, OverlayFuncOutputSeries]]
+OverlayFuncGroupwise = Callable[[pd.Series, pd.Grouper], OverlayFuncOutputSeries]
+OverlayFunc = Union[OverlayFuncNatural, OverlayFuncGroupwise]
 
 
 class OverlaySpec(BaseModel):
@@ -826,6 +845,8 @@ class OverlaySpec(BaseModel):
     label: str
     label_brief: Optional[str] = None
     category: OverlayCategory
+    mode: OverlayMode = 'line'
+    operates_on: Literal['raw', 'binned'] = 'raw'
     _func: str
 
     @property
@@ -841,27 +862,29 @@ class OverlaySpec(BaseModel):
         return self.label_brief or self.label
 
 
-def _p10(x: pd.Series) -> float:  return x.quantile(0.10)
-def _q1(x: pd.Series) -> float:   return x.quantile(0.25)
-def _q2(x: pd.Series) -> float:   return x.quantile(0.50)
-def _q3(x: pd.Series) -> float:   return x.quantile(0.75)
-def _p90(x: pd.Series) -> float:  return x.quantile(0.90)
+def _p10(x: pd.Series) -> OverlayFuncOutputScalar:         return x.quantile(0.10),
+def _q1(x: pd.Series) -> OverlayFuncOutputScalar:          return x.quantile(0.25),
+def _q2(x: pd.Series) -> OverlayFuncOutputScalar:          return x.quantile(0.50),
+def _q3(x: pd.Series) -> OverlayFuncOutputScalar:          return x.quantile(0.75),
+def _p90(x: pd.Series) -> OverlayFuncOutputScalar:         return x.quantile(0.90),
+def _mean(x: pd.Series) -> OverlayFuncOutputScalar:        return x.mean(),
+def _plus_1std(x: pd.Series) -> OverlayFuncOutputScalar:   return x.mean() + x.std(),
+def _plus_2std(x: pd.Series) -> OverlayFuncOutputScalar:   return x.mean() + 2 * x.std(),
+def _plus_3std(x: pd.Series) -> OverlayFuncOutputScalar:   return x.mean() + 3 * x.std(),
+def _minus_1std(x: pd.Series) -> OverlayFuncOutputScalar:  return x.mean() - x.std(),
+def _minus_2std(x: pd.Series) -> OverlayFuncOutputScalar:  return x.mean() - 2 * x.std(),
+def _minus_3std(x: pd.Series) -> OverlayFuncOutputScalar:  return x.mean() - 3 * x.std(),
 
-def _mean(x: pd.Series) -> float:        return x.mean()
-def _plus_1std(x: pd.Series) -> float:   return x.mean() + x.std()
-def _plus_2std(x: pd.Series) -> float:   return x.mean() + 2 * x.std()
-def _plus_3std(x: pd.Series) -> float:   return x.mean() + 3 * x.std()
-def _minus_1std(x: pd.Series) -> float:  return x.mean() - x.std()
-def _minus_2std(x: pd.Series) -> float:  return x.mean() - 2 * x.std()
-def _minus_3std(x: pd.Series) -> float:  return x.mean() - 3 * x.std()
-
-def _mode(x: pd.Series) -> float:
+def _mode(x: pd.Series) -> OverlayFuncOutputScalar:
     mode = x.mode()
-    if len(mode) == 0:    return float('nan')
-    elif len(mode) == 1:  return mode.iloc[0]
-    else:                  return mode.mean()
-def _min(x: pd.Series) -> float:   return x.min()
-def _max(x: pd.Series) -> float:   return x.max()
+    if len(mode) == 0:    return float('nan'),
+    elif len(mode) == 1:  return mode.iloc[0],
+    else:                  return mode.mean(),
+def _min(x: pd.Series) -> OverlayFuncOutputScalar:   return x.min(),
+def _max(x: pd.Series) -> OverlayFuncOutputScalar:   return x.max(),
+
+def _group_med_only(x: pd.Series, grouper:pd.Grouper) -> OverlayFuncOutputSeries:
+    return x.groupby(level=0).median(),
 
 OVERLAY_FUNCS: Dict[OverlayKind, OverlayFunc] = {
     'p10': _p10,
@@ -880,8 +903,13 @@ OVERLAY_FUNCS: Dict[OverlayKind, OverlayFunc] = {
 
     'mode': _mode,
     'min': _min,
-    'max': _max
+    'max': _max,
+
+    'group-med-only': _group_med_only,
 }
+
+
+
 
 
 class OverlayPatternMatchIdType(TypedDict):
@@ -891,6 +919,198 @@ class OverlayPatternMatchIdType(TypedDict):
     kind: str
     component: Literal['axis-icon', 'text', 'remove']
 
+
+GraphAnnotationSpec: TypeAlias = Dict[str, Any] # literally stands in for **kwargs to go to fig.add_annotation()
+HexColorStr = str
+OverlayPlotElement = Union[PlotlyBaseTraceType, GraphAnnotationSpec]
+
+
+class OverlayResult(ABC):
+    """Common interface for all overlay result containers."""
+
+    from_overlay: "ConcreteOverlay"
+    x: pd.Series
+    y: pd.Series
+
+    @abstractmethod
+    def get_plot_elements(
+        self,
+        trace_color: HexColorStr,
+        trace_name: str,
+    ) -> Tuple[OverlayPlotElement, ...]:
+        ...
+
+class OverlayWithAnnotation(OverlayResult):
+    """For overlays that put a label on the plot."""
+
+    def _make_annotation(
+        self,
+        trace_color: HexColorStr,
+        scope_label: str = "global",
+    ) -> GraphAnnotationSpec:
+        annotation_text = (
+            f"<b>{self.from_overlay.spec.annotation_text}</b> "
+            f"<span style='color:{trace_color};'>■</span> "
+            f"<i>({scope_label})</i>"
+        )
+        text_x, text_y = self.x.iloc[-1], self.y.iloc[-1]
+        return dict(
+            x=text_x,
+            y=text_y,
+            text=annotation_text,
+            showarrow=False,
+            xanchor="right",
+            yanchor="bottom" if self.from_overlay.axis == "y" else "top",
+            textangle=0 if self.from_overlay.axis == "y" else 270,
+            font=dict(
+                color="black",
+                size=12,
+            ),
+        )
+
+
+@dataclass
+class OverlayLineResult(OverlayWithAnnotation):
+    from_overlay: "ConcreteOverlay"
+    x: pd.Series
+    y: pd.Series
+
+    def get_plot_elements(
+        self,
+        trace_color: HexColorStr,
+        trace_name: str,
+    ) -> Tuple[OverlayPlotElement, ...]:
+        trace = go.Scatter(
+            x=self.x,
+            y=self.y,
+            mode="lines",
+            line=dict(
+                color=trace_color,
+                width=1,
+                dash="dash",
+            ),
+            name=trace_name,
+            showlegend=False,
+        )
+        annotation = self._make_annotation(trace_color=trace_color, scope_label="global")
+        return trace, annotation
+
+
+@dataclass
+class OverlayErrorBarResult(OverlayWithAnnotation):
+    from_overlay: "ConcreteOverlay"
+    x: pd.Series
+    y: pd.Series
+    error_positive: pd.Series
+    error_negative: pd.Series
+
+    def get_plot_elements(
+        self,
+        trace_color: HexColorStr,
+        trace_name: str,
+    ) -> Tuple[OverlayPlotElement, ...]:
+        trace = go.Scatter(
+            x=self.x,
+            y=self.y,
+            mode="markers",
+            error_y=dict(
+                type="data",
+                symmetric=False,
+                array=self.error_positive,
+                arrayminus=self.error_negative,
+                color=trace_color,
+                thickness=1,
+                width=4,
+            )
+            if self.from_overlay.axis == "y"
+            else None,
+            error_x=dict(
+                type="data",
+                symmetric=False,
+                array=self.error_positive,
+                arrayminus=self.error_negative,
+                color=trace_color,
+                thickness=1,
+                width=4,
+            )
+            if self.from_overlay.axis == "x"
+            else None,
+            marker=dict(
+                color=trace_color,
+                size=6,
+            ),
+            name=trace_name,
+            showlegend=False,
+        )
+        annotation = self._make_annotation(trace_color=trace_color, scope_label="global")
+        return trace, annotation
+
+
+@dataclass
+class OverlayBoxAndWhiskerResult(OverlayResult):
+    from_overlay: "ConcreteOverlay"
+    x: pd.Series
+    q1: pd.Series
+    median: pd.Series
+    q3: pd.Series
+    group_sizes: pd.Series
+    lowerfence: pd.Series  # Q1 - 1.5*IQR
+    upperfence: pd.Series  # Q3 + 1.5*IQR
+    mean: pd.Series
+    std: pd.Series
+    notchspan: pd.Series
+
+    @property
+    def y(self) -> pd.Series:
+        """Alias for median so it has similar API as the other OverlayResult types."""
+        return self.median
+
+    def get_plot_elements(
+        self,
+        trace_color: HexColorStr,
+        trace_name: str,
+    ) -> Tuple[OverlayPlotElement, ...]:
+        kwargs = (
+            dict(
+                x=self.x,
+                q1=self.q1,
+                median=self.median,
+                q3=self.q3,
+                lowerfence=self.lowerfence,
+                upperfence=self.upperfence,
+                notchspan=self.notchspan,
+                name=trace_name,
+                marker_color=trace_color,
+                boxpoints=False,
+            )
+            | ({"mean": self.mean} if self.mean is not None else {})
+            | ({"sd": self.std} if self.std is not None else {})  # <-- sd, not std
+        )
+        box = go.Box(**kwargs)
+        return (box,)
+
+
+def normal_percentile_to_zscore(pctile: float) -> float:
+    """Convert a percentile (0.0-1.0) to a z-score for a normal distribution."""
+    return math.sqrt(2) * scipy.special.erfinv(2*pctile - 1) #pylint: disable=no-member # yeah it does
+
+ALPHA_95 = 0.05
+CI_95 = 1.0 - ALPHA_95
+Z_SCORE_750 = normal_percentile_to_zscore(0.750)  # ~0.67 (one-sided 75% CI)
+
+def notch_constant(conf_level: float = CI_95) -> float:
+    """
+    Return c such that notch = median ± c * IQR / sqrt(n)
+    for a two-sided normal-based CI with the given confidence.
+    """
+    p = 1 - (1 - conf_level) / 2  # e.g. 0.975 for 95%
+    z_p = normal_percentile_to_zscore(p)
+    return float(z_p * math.sqrt(math.pi / 2) / (2 * Z_SCORE_750))
+
+NOTCH_CONSTANT_95CI = notch_constant()
+
+
+Tup3: TypeAlias = Tuple[pd.Series, pd.Series, pd.Series]
 
 class ConcreteOverlay(BaseModel):
     spec: OverlaySpec
@@ -974,27 +1194,85 @@ class ConcreteOverlay(BaseModel):
                 ])
             ]
         )
-        
 
-    def compute(self, x_ser: pd.Series, y_ser: pd.Series, bounds: Tuple[Hashable, Hashable]) -> Tuple[pd.Series, pd.Series]:
-        # accept x-trace and y-trace pd.Series's, apply func to the appropriate one, return a tuple of
-        # (x_overlay_series, y_overlay_series) where whichever axis is NOT the overlay is returned as-is.
-        # in the case where overlay function returns a single scalar value, replicate it twice at the min and max of the other axis
-        # for a two-point straight line spanning the entire other axis.
 
-        data = self.spec.func(x_ser if self.axis == 'x' else y_ser)
-        if isinstance(data, pd.Series):
-            return (
-                data if self.axis == 'x' else y_ser,
-                data if self.axis == 'y' else x_ser,
-            )
-        else: # single scalar float
-            x_ser = pd.Series([x_ser.min(), x_ser.max()])
-            y_ser = pd.Series([y_ser.min(), y_ser.max()])
-            return (
-                pd.Series([data, data]) if self.axis == 'x' else pd.Series(bounds),
-                pd.Series([data, data]) if self.axis == 'y' else pd.Series(bounds),
-            )
+    def compute(
+                self,
+                x_ser: pd.Series,
+                y_ser: pd.Series,
+                bounds: Optional[Tuple[Hashable, Hashable]]=None,
+                grouper:Optional[pd.Grouper]=None
+            ) -> Union[OverlayLineResult, OverlayErrorBarResult, OverlayBoxAndWhiskerResult]:
+        match self.spec.mode:
+            case 'line':
+                assert bounds is not None, "bounds must be provided for flat line overlays"
+                func = cast( OverlayFuncNatural, self.spec.func )
+                data = func(x_ser if self.axis == 'x' else y_ser)
+                if isinstance(data, tuple):
+                    data = data[0] # func is required to a tuple, even if single value
+                if isinstance(data, pd.Series):
+                    return OverlayLineResult(
+                        from_overlay=self,
+                        x = data if self.axis == 'x' else x_ser,
+                        y = data if self.axis == 'y' else y_ser,
+                    )
+                else: # single scalar float
+                    return OverlayLineResult (
+                        from_overlay=self,
+                        x=pd.Series([data, data]) if self.axis == 'x' else pd.Series(bounds),
+                        y=pd.Series([data, data]) if self.axis == 'y' else pd.Series(bounds),
+                    )
+            case 'errorbar':
+                assert grouper is not None, "grouper must be provided for groupwise overlays"
+                match self.spec.kind:
+                    case 'group-med-plusminus-minmax':
+                        func = cast( OverlayFuncGroupwise, self.spec.func )
+                        tup = func(x_ser if self.axis == 'x' else y_ser, grouper)
+                        median, minima, maxima = tup
+                        return OverlayErrorBarResult(
+                            from_overlay=self,
+                            x=median if self.axis == 'x' else x_ser,
+                            y=median if self.axis == 'y' else y_ser,
+                            error_positive= maxima - median,
+                            error_negative= median - minima,
+                        )
+                    case 'group-mean-plusminus-1std':
+                        func = cast( OverlayFuncGroupwise, self.spec.func )
+                        tup = func(x_ser if self.axis == 'x' else y_ser, grouper)
+                        mean, std = tup
+                        return OverlayErrorBarResult(
+                            from_overlay=self,
+                            x=mean if self.axis == 'x' else x_ser,
+                            y=mean if self.axis == 'y' else y_ser,
+                            error_positive= std,
+                            error_negative= std,
+                        )
+                    case _:
+                        raise RuntimeError(f"Unknown overlay kind: {self.spec.kind}")
+            case 'box':
+                assert grouper is not None, "grouper must be provided for groupwise overlays"
+                func = cast( OverlayFuncGroupwise, self.spec.func )
+                q1, q2, q3, mean, std, group_sizes = func(x_ser if self.axis == 'x' else y_ser, grouper)
+                iqr = q3 - q1
+                lowerfence = q1 - 1.5 * iqr
+                upperfence = q3 + 1.5 * iqr
+                # notch = median ± c * IQR / sqrt(n)   |   notchspan is just the plus/minus part
+                notchspan = NOTCH_CONSTANT_95CI * iqr / np.sqrt(group_sizes)
+                return OverlayBoxAndWhiskerResult(
+                    from_overlay=self,
+                    x=x_ser if self.axis == 'x' else y_ser,
+                    q1=q1,
+                    median=q2,
+                    q3=q3,
+                    group_sizes=group_sizes,
+                    lowerfence=lowerfence,
+                    upperfence=upperfence,
+                    mean=mean,
+                    std=std,
+                    notchspan=notchspan,
+                )
+            case _:
+                raise RuntimeError(f"Unknown overlay kind: {self.spec.kind}")
 
 
     def mutate(self, callback_input:Dict[str, Any]):
@@ -1020,6 +1298,8 @@ OVERLAY_SPECS: Dict[OverlayKind, OverlaySpec] = {
         OverlaySpec(kind='mode', label='Mode', category='Extrema', _func='_mode'),
         OverlaySpec(kind='min', label='Minimum', label_brief='Min', category='Extrema', _func='_min'),
         OverlaySpec(kind='max', label='Maximum', label_brief='Max', category='Extrema', _func='_max'),
+
+        #OverlaySpec(kind='gq2', label='Median (Q2)', label_brief='Q2', category='Groupwise', _func='_q2', operates_on='binned'),
     ]
 }
 
@@ -1046,11 +1326,42 @@ class BinningFunction(BaseModel, ABC):
     axis: Literal['x','y']
 
     @abstractmethod
-    def bin(self, ser: pd.Series) -> pd.Series: ...
+    def get_group_labels(self, df: pd.DataFrame, field: str) -> pd.Series[pd.CategoricalDtype]:
+        """
+        Return an index-aligned Series of bin labels, one per row of df.
+
+        Subclasses may use:
+        - columns in df
+        - levels of a MultiIndex
+        - some function of both
+        """
+        ... #pylint: disable=unnecessary-ellipsis
+
+    @property
+    def BINLABEL_COLUMN(self) -> str: #pylint: disable=invalid-name
+        return f"__{self.axis}_bin_label__"
+
+    def bin(self, df: pd.DataFrame, field: str) -> pd.DataFrame:
+        """
+        Add a categorical 'bin label' column to df and return a new DataFrame.
+
+        - Uses self.get_group_labels(df) to compute the bin for each row
+        - Preserves the original index (MultiIndex or otherwise)
+        - Does NOT aggregate; it just annotates each row with its bin
+          - Do your own aggregation elsewhere and easily by grouping on the new categorical bin label column
+        """
+        labels = self.get_group_labels(df, field)
+        assert labels.index.equals(df.index), "get_group_labels must return an index-aligned Series"
+        assert isinstance(labels.dtype, pd.CategoricalDtype), "get_group_labels must return a pd.CategoricalDtype Series"
+        result = df.copy()
+        result[self.BINLABEL_COLUMN] = labels
+        return result
+
+
 
     def mutate(self, callback_input:Dict[str, Any]) -> None:
         """Mutate internal state based on a callback input dict."""
-        pass
+        pass #pylint: disable=unnecessary-pass
 
     # ---------- STATIC / CLASS API FOR WIRING ----------
     @classmethod
@@ -1072,7 +1383,7 @@ class BinningFunction(BaseModel, ABC):
         return {"display_container": f"{prefix}-binning-{kind}-{axis}-display"}
 
     @classmethod
-    def layout(cls, prefix: str, axis: Literal['x','y']) -> dash_devbase.Component:
+    def layout(cls, prefix: str, axis: Literal['x','y']) -> dash_devbase.Component: #pylint: disable=unused-argument
         """
         Compute layout without needing an instance.
         Default implementation can delegate to the instance method.
@@ -1087,7 +1398,7 @@ class BinningFunction(BaseModel, ABC):
         return set_visibility({}, visible=(selected_kind == kind), visible_style='flex')
 
     @classmethod
-    def callbacks(cls, prefix: str) -> List[CallbackDeclarationSpec]:
+    def callbacks(cls, prefix: str) -> List[CallbackDeclarationSpec]: #pylint: disable=unused-argument
         """
         Subclasses override this to declare additional callbacks
         (e.g. for controls like n_bins). Default: none.
@@ -1121,8 +1432,12 @@ class NoOpBinningFunction(BinningFunction):
     kind: Literal['none'] = NOOP_KIND
     label: ClassVar[str] = 'No Binning'
 
-    def bin(self, ser: pd.Series) -> pd.Series:
-        return ser
+    def get_group_labels(self, df: pd.DataFrame, field: str) -> pd.Series[pd.CategoricalDtype]:
+        bins = pd.Series(
+            pd.Categorical(['All Data'] * len(df), categories=['All Data'], ordered=True),
+            index=df.index
+        )
+        return bins
 
     @classmethod
     def layout(cls, prefix: str, axis: Literal['x','y']) -> dash_devbase.Component:
@@ -1140,8 +1455,12 @@ class NBinsBinningFunction(BinningFunction):
     label: ClassVar[str] = 'Fixed Number of Bins'
     n_bins: int = 10
 
-    def bin(self, ser: pd.Series) -> pd.Series:
-        return pd.cut(ser, bins=self.n_bins)
+    def get_group_labels(self, df: pd.DataFrame, field: str) -> pd.Series[pd.CategoricalDtype]:
+        ser = df[field]
+        bins = pd.cut(ser, bins=self.n_bins, duplicates='drop') # this is a series of pd.Categorical with pd.Interval categories co-indexed with df
+        # plotly's json serialization doesn't understand pd.Interval so we have to stringify it ourselves first
+        # pandas's default stringification is good enough here, giving labels of the form e.g. "[0, 10)"
+        return bins.astype(str).astype('category')
 
     def mutate(self, callback_input:Dict[str, Any]) -> None:
         ids = self.get_dash_ids_static(self.prefix, NBINS_KIND, self.axis)
@@ -2015,6 +2334,7 @@ class Distro:
         print(f"_update_graph({use_dark_mode=},   {plot_settings=},   {schema=})")
         try:
             plot_settings = PlotSettings(**plot_settings) if plot_settings else PlotSettings(prefix=self._p(''),)
+            assert plot_settings.x_column is not None and plot_settings.y_column is not None # shouldn't actually be possible in the UI
             schema = DatasourceSchema(**schema) if schema else DatasourceSchema(columns=[], name="No data")
             if schema.has_data is False:
                 #print("_update_graph() -> schema.has_data is False")
@@ -2046,7 +2366,29 @@ class Distro:
             # ===== Filters =====
             boolmasks = [f.mask(df) for f in plot_settings.filters]
             df = df[functools.reduce(lambda l,r: (l & r), boolmasks, pd.Series(True, index=df.index))]
+            ser_x_raw = df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=df.index)
+            ser_y_raw = df[plot_settings.y_column] if plot_settings.y_column else pd.Series(dtype='float', index=df.index)
 
+            # ===== Binning =====
+            x_binfunc = plot_settings.x_binfuncs[plot_settings.x_selected_binfunc]
+            y_binfunc = plot_settings.y_binfuncs[plot_settings.y_selected_binfunc]
+            df_x_binned = x_binfunc.bin(df, field=plot_settings.x_column)
+            df_y_binned = y_binfunc.bin(df, field=plot_settings.y_column)
+            #df_x_binned and df_y_binned are nearly identical to the base df, except that each one has a new column one of '__x_bin_label__' or '__y_bin_label__'
+            #take those out and insert them into the base df
+            ser_x_labels = df_x_binned[x_binfunc.BINLABEL_COLUMN]
+            ser_y_labels = df_y_binned[y_binfunc.BINLABEL_COLUMN]
+            df.insert(0, y_binfunc.BINLABEL_COLUMN, ser_y_labels)
+            df.insert(0, x_binfunc.BINLABEL_COLUMN, ser_x_labels)
+            
+            bin_df = pd.DataFrame({
+                'x': ser_x_raw,
+                'y': ser_y_raw,
+                'x_binned': ser_x_labels,
+                'y_binned': ser_y_labels,
+            }, index=df.index)
+
+            # ===== Base Figure Construction: Scatter and Marginal Histograms =====
             fig = make_subplots(
                 rows=2, row_heights=[0.1, 0.9],
                 cols=2, column_widths=[0.9, 0.1],
@@ -2059,10 +2401,10 @@ class Distro:
             assert continuous_color_scale is not None
 
             for i, category in enumerate(ser_color_group.cat.categories):
-                group_df = df[ser_color_group == category]
-                group_x = group_df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=group_df.index)
-                group_y = group_df[plot_settings.y_column] if plot_settings.y_column else pd.Series(dtype='float', index=group_df.index)
-                group_z = group_df[plot_settings.z_column] if plot_settings.z_column else pd.Series(dtype='float', index=group_df.index)
+                group_df = bin_df[ser_color_group == category]
+                group_x = group_df['x_binned' if plot_settings.x_selected_binfunc != 'none' else 'x']
+                group_y = group_df['y_binned' if plot_settings.y_selected_binfunc != 'none' else 'y']
+                    
                 group_color_value = group_df[color_column] if color_column else pd.Series(dtype='float', index=group_df.index)
 
                 if plot_settings.dimensionality == '2d':
@@ -2129,41 +2471,18 @@ class Distro:
             for overlay in plot_settings.overlays:
                 # do global overlays
                 if plot_settings.overlay_globally_enabled:
-                    #group_x = group_df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=group_df.index)
-                    ser_x = df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=df.index)
-                    ser_y = df[plot_settings.y_column] if plot_settings.y_column else pd.Series(dtype='float', index=df.index)
+                    ser_x = bin_df['x_binned' if overlay.spec.operates_on == 'binned' else 'x']
+                    ser_y = bin_df['y_binned' if overlay.spec.operates_on == 'binned' else 'y']
                     global_bounds = (ser_y.min(), ser_y.max()) if overlay.axis == 'x' else (ser_x.min(), ser_x.max())
-                    ovr_ser_x, ovr_ser_y = overlay.compute(ser_x, ser_y, global_bounds)
+                    overlay_data = overlay.compute(ser_x, ser_y, global_bounds)
+                    #TODO: what about the grouper
+                    overlay_markup = overlay_data.get_plot_elements(trace_color='black', trace_name=f"{overlay.spec.label} (global)")
+                    for element in overlay_markup:
+                        if isinstance(element, PlotlyBaseTraceType):
+                            fig.add_trace(element, row=2, col=1)
+                        else:
+                            fig.add_annotation(**element, row=2, col=1)
 
-                    fig.add_trace(
-                        go.Scatter(
-                            x=ovr_ser_x, y=ovr_ser_y,
-                            mode='lines',
-                            line = dict(
-                                color='black',
-                                width=1,
-                                dash='dash',
-                            ),
-                            name=f"{overlay.spec.label} (global)",
-                            showlegend=False,
-                        ),
-                        row=2, col=1
-                    )
-                    annotation_text = f"<b>{overlay.spec.annotation_text}</b> <span style='color:black;'>■</span> <i>(global)</i>"
-                    text_x, text_y = ovr_ser_x.iloc[-1], ovr_ser_y.iloc[-1]
-                    fig.add_annotation(
-                        x=text_x, y=text_y,
-                        text=annotation_text,
-                        showarrow=False,
-                        xanchor='right',
-                        yanchor='bottom' if overlay.axis == 'y' else 'top',
-                        textangle=0 if overlay.axis == 'y' else 270,
-                        font=dict(
-                            color='black',
-                            size=12,
-                        ),
-                        row=2, col=1
-                    )
                 # do per-color-group overlays
                 print(f"{plot_settings.overlay_per_colorgroup_enabled=}, {plot_settings.color_enabled=}, {plot_settings.color_column_type=}")
                 if plot_settings.overlay_per_colorgroup_enabled and plot_settings.color_enabled and plot_settings.color_column_type == 'discrete':
@@ -2175,37 +2494,14 @@ class Distro:
                         group_df = df[ser_color_group == category]
                         ser_x = group_df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=group_df.index)
                         ser_y = group_df[plot_settings.y_column] if plot_settings.y_column else pd.Series(dtype='float', index=group_df.index)
-                        ovr_ser_x, ovr_ser_y = overlay.compute(ser_x, ser_y, global_bounds)
-
-                        fig.add_trace(
-                            go.Scatter(
-                                x=ovr_ser_x, y=ovr_ser_y,
-                                mode='lines',
-                                line = dict(
-                                    color=discrete_colorscale[i],
-                                    width=1,
-                                    dash='dash',
-                                ),
-                                name=f"{overlay.spec.label} ({category})",
-                                showlegend=False,
-                            ),
-                            row=2, col=1
-                        )
-                        annotation_text = f"<b>{overlay.spec.annotation_text}</b> <span style='color:{discrete_colorscale[i]};'>■</span> <i>({category})</i>"
-                        text_x, text_y = ovr_ser_x.iloc[-1], ovr_ser_y.iloc[-1]
-                        fig.add_annotation(
-                            x=text_x, y=text_y,
-                            text=annotation_text,
-                            showarrow=False,
-                            xanchor='right',
-                            yanchor='bottom' if overlay.axis == 'y' else 'top',
-                            textangle=0 if overlay.axis == 'y' else 270,
-                            font=dict(
-                                color='black',
-                                size=12,
-                            ),
-                            row=2, col=1
-                        )
+                        overlay_data = overlay.compute(ser_x, ser_y, global_bounds)
+                        #TODO: what about the grouper
+                        overlay_markup = overlay_data.get_plot_elements(trace_color=discrete_colorscale[i], trace_name=f"{overlay.spec.label} ({category})")
+                        for element in overlay_markup:
+                            if isinstance(element, PlotlyBaseTraceType):
+                                fig.add_trace(element, row=2, col=1)
+                            else:
+                                fig.add_annotation(**element, row=2, col=1)
 
 
 
@@ -2238,8 +2534,9 @@ class Distro:
                 print(f"  -> {plot_settings=}")
             err_text = "An error has occurred.<br><br>" + str(e.__class__.__name__) + ': ' + str(e).replace('\n', '<br>')
             err_text += '<br><br>' + traceback_text
-            raise e
             err_fig = error_figure(use_dark_mode, err_text)
+            if DEBUG:
+                raise e
             return err_fig
 
 
@@ -2441,7 +2738,7 @@ class Distro:
         )(self._update_graph)
 
 
-def demo_iris_getter() -> Tuple[str, pd.DataFrame]:
+def demo_iris_getter() -> Tuple[str, pd.DataFrame]:#df
     df = DuckDBMonitorMiddleware.get_dataframe("SELECT * FROM datasets.iris;")
     df['Species'] = df['Species'].astype('category')
     df['Petal.Width'] = df['Petal.Width'].astype('int')
