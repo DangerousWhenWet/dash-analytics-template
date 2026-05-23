@@ -78,7 +78,7 @@ app.layout = dmc.MantineProvider(
                                         nbar.BURGER_CLOSED,
                                         id='mobile-burger',
                                         variant='transparent',
-                                        size=30,
+                                        size='30',
                                         hiddenFrom="sm"
                                     ),
 
@@ -86,14 +86,14 @@ app.layout = dmc.MantineProvider(
                                         nbar.BURGER_OPEN,
                                         id='desktop-burger',
                                         variant='transparent',
-                                        size=30,
+                                        size='30',
                                         visibleFrom="sm"
                                     ),
 
                                     DashIconify(
                                         icon='arcticons:testy',
-                                        width=30,
-                                        height=30,
+                                        width='30',
+                                        height='30',
                                     ),
 
                                     dmc.Title('Demo App', c='dark', my=0, lh=1.0),

@@ -1168,7 +1168,7 @@ class OverlayBoxAndWhiskerResult(OverlayResult):
     notchspan: pd.Series
 
     @property
-    def y(self) -> pd.Series:
+    def y(self) -> pd.Series: # pyright: ignore[reportIncompatibleVariableOverride]
         """Alias for median so it has similar API as the other OverlayResult types."""
         return self.median
 
