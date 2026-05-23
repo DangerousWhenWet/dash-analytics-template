@@ -35,6 +35,17 @@ def ignore_warnings():
         yield
 
 
+@contextmanager
+def managed_duck_conn(conn: Optional[duckdb.DuckDBPyConnection] = None, read_only: bool = False):
+    supplied = conn is not None
+    conn = conn or duckdb.connect(DUCKDB.PATH, read_only=read_only)
+    try:
+        yield conn
+    finally:
+        if not supplied:
+            conn.close()
+
+
 class DUCKDB: #pylint: disable=too-few-public-methods
     """
     It's a singleton container for DuckDB connection info, and has utility functions for initialization, ingestion, and maintenance of data.
@@ -116,9 +127,7 @@ class DUCKDB: #pylint: disable=too-few-public-methods
                 owned_by:Optional[str] = 'unknown',
                 conn:Optional[duckdb.DuckDBPyConnection] = None
             ):
-        supplied_conn = conn is not None
-        try:
-            conn = conn or duckdb.connect(DUCKDB.PATH)
+        with managed_duck_conn(conn) as conn:
             if table_already_exists := conn.execute("SELECT COUNT(*) FROM duckdb_tables() WHERE schema_name = 'datasets' AND table_name = ?;", [table_name]).fetchone():
                 table_already_exists = bool(table_already_exists[0])
             conn.sql(f"CREATE OR REPLACE TABLE datasets.{table_name} AS SELECT * FROM df;")
@@ -140,11 +149,6 @@ class DUCKDB: #pylint: disable=too-few-public-methods
                     INSERT INTO administrative.table_catalog ({','.join(params.keys())})
                     VALUES ({','.join(['?'] * len(params))});
                 """, params=list(params.values()))
-
-        finally:
-            if not supplied_conn:
-                print("DUCKDB.ingest closing its own connection")
-                conn.close() #type: ignore
     
     @staticmethod
     def pseudo_ingest(
@@ -161,11 +165,12 @@ class DUCKDB: #pylint: disable=too-few-public-methods
         add the table to the catalog. Use it when you want to borrow the usage tracking / ownership
         mechanism but your data set is external to DuckDB.
         """
-        supplied_conn = conn is not None
         etc = etc or {}
-        try:
+        with managed_duck_conn(conn) as conn:
             match external_type:
                 case 'postgres':
+                    if POSTGRES.ETC_SCHEMA is None:
+                        POSTGRES.reload_config()
                     POSTGRES.ETC_SCHEMA.validate(etc)
                     cluster_exists = etc['cluster'] in POSTGRES.CLUSTERS
                     db_exists = etc['database'] in POSTGRES.CLUSTERS.get(etc['cluster'], {}).get('databases', [])
@@ -174,21 +179,17 @@ class DUCKDB: #pylint: disable=too-few-public-methods
                 case _:
                     raise ValueError(f"Unknown external_type: {external_type}")
             
-            conn = conn or duckdb.connect(DUCKDB.PATH)
-            #if table_already_exists := conn.execute("SELECT COUNT(*) FROM duckdb_tables() WHERE schema_name = 'datasets' AND table_name = ?;", [table_name]).fetchone():
             if table_already_exists := conn.execute("SELECT COUNT(*) FROM administrative.table_catalog WHERE table_name = ?;", [table_name]).fetchone():
                 table_already_exists = bool(table_already_exists[0])
-            
+
             params = {k:v for k,v in zip(
                 ['table_name', 'table_description', 'table_type', 'owned_by', 'is_pseudo_table', 'external_type', 'etc'],
                 [table_name, table_description, table_type, owned_by, True, external_type, etc]
             ) if v is not None}
 
             if table_already_exists:
-                # Build the set clause for all fields except table_name (the key)
                 update_fields = [k for k in params.keys() if k != 'table_name']
                 set_clause = ', '.join([f"{field} = ?" for field in update_fields])
-                
                 conn.sql(f"""
                     --sql
                     INSERT INTO administrative.table_catalog ({','.join(params.keys())}, updates, updated)
@@ -203,10 +204,6 @@ class DUCKDB: #pylint: disable=too-few-public-methods
                     f"INSERT INTO administrative.table_catalog ({','.join(params.keys())}) VALUES ({','.join(['?'] * len(params))});",
                     params=list(params.values())
                 )
-        finally:
-            if not supplied_conn:
-                print("DUCKDB.pseudo_ingest closing its own connection")
-                conn.close() #type: ignore
 
 
 class POSTGRES: #pylint: disable=too-few-public-methods
@@ -280,6 +277,8 @@ class POSTGRES: #pylint: disable=too-few-public-methods
         """
         with open(hjson_file, 'r', encoding='utf8') as f: #pylint: disable=redefined-outer-name
             definition = hjson.load(f)
+            if POSTGRES.HJSON_SCHEMA is None:
+                POSTGRES.reload_config()
             POSTGRES.HJSON_SCHEMA.validate(definition)
             POSTGRES.ingest(
                 table_name=definition['table_name'],
@@ -389,20 +388,14 @@ def get_connection_detail(connection_type:Literal['duck', 'postgres'], table_nam
 #module global singleton map of key: table_name in the catalog, value: a connection detail object capable of providing connection and friendly name of the backend
 map_tables_to_connections: Dict[str, ConnectionDetail[Any]] = {}
 def update_connection_map(conn: Optional[duckdb.DuckDBPyConnection] = None):
-    supplied_conn = conn is not None
-    try:
-        conn = conn or duckdb.connect(DUCKDB.PATH, read_only=True)
-        from . import DuckDBMonitorMiddleware, PostgresMonitorMiddleware  #pylint: disable=import-outside-toplevel
-        global map_tables_to_connections #pylint: disable=global-statement
-        duck_details = {tbl: get_connection_detail('duck', tbl, cast(Dict[str, Any], {})) for tbl in DuckDBMonitorMiddleware.ask_available_tables(conn=conn,)}
+    from . import DuckDBMonitorMiddleware, PostgresMonitorMiddleware  #pylint: disable=import-outside-toplevel
+    global map_tables_to_connections #pylint: disable=global-statement
+    with managed_duck_conn(conn, read_only=True) as conn:
+        duck_details = {tbl: get_connection_detail('duck', tbl, cast(Dict[str, Any], {})) for tbl in DuckDBMonitorMiddleware.ask_available_tables(conn=conn)}
         duck_details = {k:v for k,v in duck_details.items() if v is not None}
         pg_details = {tbl: get_connection_detail('postgres', tbl, cast(Dict[str, Any], etc)) for (tbl, etc) in PostgresMonitorMiddleware.ask_available_tables(conn=conn, with_etc=True)}
         pg_details = {k:v for k,v in pg_details.items() if v is not None}
         map_tables_to_connections = duck_details | pg_details
-    finally:
-        if not supplied_conn:
-            print("update_connection_map closing its own connection")
-            conn.close() #type: ignore
 
 
 def get_selectable_tables():

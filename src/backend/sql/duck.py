@@ -7,7 +7,7 @@ import duckdb
 import pandas as pd
 import sqlparse
 
-from .base import DUCKDB, ignore_warnings
+from .base import DUCKDB, ignore_warnings, managed_duck_conn
 
 
 class DuckDBMonitorMiddleware:
@@ -20,17 +20,10 @@ class DuckDBMonitorMiddleware:
     """
     @staticmethod
     def ask_available_tables(conn:Optional[duckdb.DuckDBPyConnection]=None) -> List[str]:
-        print(f"DuckDBMonitorMiddleware.ask_available_tables({conn=})")
-        supplied_conn = conn is not None
-        try:
-            conn = conn or duckdb.connect(DUCKDB.PATH, read_only=True)
-            sql = "SELECT table_name FROM administrative.table_catalog WHERE external_type IS NULL;"
+        sql = "SELECT table_name FROM administrative.table_catalog WHERE external_type IS NULL;"
+        with managed_duck_conn(conn, read_only=True) as conn:
             result_set = conn.execute(sql).fetchall()
-            return [row[0] for row in result_set]
-        finally:
-            if not supplied_conn:
-                print("DuckDBMonitorMiddleware.ask_available_tables closing its own connection")
-                conn.close() #type:ignore
+        return [row[0] for row in result_set]
 
 
     @staticmethod
@@ -102,19 +95,13 @@ class DuckDBMonitorMiddleware:
                 hits = hits + 1,
                 last_hit = NOW();
         """
-        params_upsert = [tables]
-        supplied_conn = conn is not None
         try:
-            conn = conn or duckdb.connect(DUCKDB.PATH)
-            conn.execute(sql_upsert, params_upsert)
+            with managed_duck_conn(conn) as conn:
+                conn.execute(sql_upsert, [tables])
         except duckdb.TransactionException as e:
             # NOTE: with high concurrency on same record this can happen. e.g. multiple celery workers hitting on the same datasource.
             #       we are dealing with the problem by applying an Ostrich Algorithm ;)
             print(f"TransactionException in log_table_usage: {e.__class__.__name__}: {e}")
-        finally:
-            if not supplied_conn:
-                print("DuckDBMonitorMiddleware.log_table_usage closing its own connection")
-                conn.close() #type: ignore
 
 
     @staticmethod
@@ -127,14 +114,9 @@ class DuckDBMonitorMiddleware:
                 updates = updates + 1,
                 updated = NOW();
         """
-        params_upsert = [tables]
-
         try:
-            if conn:
-                conn.execute(sql_upsert, params_upsert)
-            else:
-                with duckdb.connect(DUCKDB.PATH) as conn:
-                    conn.execute(sql_upsert, params_upsert)
+            with managed_duck_conn(conn) as conn:
+                conn.execute(sql_upsert, [tables])
         except duckdb.TransactionException:
             # NOTE: with high concurrency on same record this can happen. e.g. multiple celery workers hitting on the same datasource.
             #       we are dealing with the problem by applying an Ostrich Algorithm ;)
@@ -146,4 +128,4 @@ class DuckDBMonitorMiddleware:
         with ignore_warnings(), duckdb.connect(DUCKDB.PATH, *args, **kwargs) as conn:
             if not skip_logging:
                 DuckDBMonitorMiddleware.log_query(sql, conn)
-            return pd.read_sql(sql, conn)
+            return pd.read_sql_query(sql, conn)

@@ -7,10 +7,11 @@ import datetime as dt
 import functools
 import itertools
 import traceback
-from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict, NotRequired, Generic, Iterable, TypeVar, Type, TypeAlias
+from typing import cast, get_args, Annotated, Optional, List, Dict, Mapping, Tuple, Literal, Union, Any, Callable, ClassVar, TypedDict, NotRequired, Generic, Iterable, Iterator, TypeVar, Type, TypeAlias
 
 from dateutil import parser as date_parser
 import dash
+import dash_ag_grid as dag
 from dash import dcc, html, Input, Output, State
 import dash.development.base_component as dash_devbase
 from dash_iconify import DashIconify
@@ -67,7 +68,7 @@ class SubscriptableCycle(Generic[X]):
     def __len__(self) -> int:
         return len(self.iterable)
     
-    def __iter__(self) -> Iterable[X]:
+    def __iter__(self) -> Iterator[X]:
         return itertools.cycle(self.iterable)
 
 
@@ -194,7 +195,9 @@ class PlotSettings(BaseModel):
         return {
             'none': NoOpBinningFunction(prefix=self.prefix, axis=axis),
             'n-bins': NBinsBinningFunction(prefix=self.prefix, n_bins=10, axis=axis),
-            
+            'n-freq': NFreqBinningFunction(prefix=self.prefix, n_freq=10, axis=axis),
+            'quart': QuartileBinningFunction(prefix=self.prefix, axis=axis),
+            'dec': DecileBinningFunction(prefix=self.prefix, axis=axis),
         }
     
     def model_post_init(self, __context: Any) -> None: #pylint: disable=arguments-differ
@@ -766,13 +769,117 @@ class DateTimeFilter(_DateFilter):
     dateOnly: ClassVar[bool] = False
 
 
+class BoolFilter(Filter):
+    dtype: Literal['bool'] = 'bool'
+    icon: ClassVar[str] = 'mdi:toggle-switch-outline'
+    value: Optional[bool] = None
+    operator: Literal['equals'] = 'equals'
+
+    def cast(self, x: Any) -> Optional[bool]:
+        if x is None: return None
+        if isinstance(x, bool): return x
+        if isinstance(x, str): return x.lower() == 'true'
+        return bool(x)
+
+    @property
+    def layout(self):
+        id_neg, _id_op, id_enab, id_val, id_del = self.dash_ids
+        return dmc.Card(
+            withBorder=True,
+            children=[
+                dmc.CardSection(children=[
+                    dmc.Group(
+                        wrap='nowrap',
+                        children=[
+                            DashIconify(icon=self.icon, width=20, height=20),
+                            dmc.Tooltip(
+                                children=dmc.Text(
+                                    children=self.column,
+                                    size="sm",
+                                    fw="bold",
+                                    truncate='end',
+                                    flex=1,
+                                    c="var(--mantine-color-text)", #type: ignore
+                                    bg="var(--mantine-color-gray-1)", #type: ignore
+                                    ff="monospace",
+                                    px=1,
+                                    py=1,
+                                    style={"borderRadius": "4px", "border": "1px solid var(--mantine-color-gray-3)"}
+                                ),
+                                label=self.column,
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                                boxWrapperProps={'flex': '1'},
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.Switch(
+                                    id=id_neg, #type: ignore
+                                    offLabel=DashIconify(icon="mdi:equal", width=15,),
+                                    onLabel=DashIconify(icon="ic:baseline-not-equal", width=15,),
+                                    checked=self.negated
+                                ),
+                                label='Logical negation: "IS" or "IS NOT"',
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.Checkbox(
+                                    id=id_enab, #type: ignore
+                                    checked=self.enabled,
+                                    size="xs",
+                                ),
+                                label="Enable/disable filter",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            )
+                        ]
+                    ),
+                    dmc.Group(
+                        wrap='nowrap',
+                        children=[
+                            dmc.Select(
+                                id=id_val, #type: ignore
+                                data=[{'value': 'true', 'label': 'True'}, {'value': 'false', 'label': 'False'}],
+                                value='true' if self.value is True else ('false' if self.value is False else None),
+                                placeholder="Select value...",
+                                clearable=True,
+                                size='xs',
+                                flex=1,
+                            ),
+                            dmc.Tooltip(
+                                children=dmc.ActionIcon(
+                                    DashIconify(icon='material-symbols:close', width=20, height=20),
+                                    id=id_del, #type: ignore
+                                    variant='transparent',
+                                    size='xs',
+                                ),
+                                label="Remove filter",
+                                position='top',
+                                radius='xs',
+                                withArrow=True,
+                            )
+                        ]
+                    )
+                ])
+            ]
+        )
+
+    def mask(self, df:pd.DataFrame) -> pd.Series:
+        if any((self.value is None, self.enabled is False)): return pd.Series(True, index=df.index)
+        mask = df[self.column] == self.value
+        return ~mask if self.negated else mask
+
+
 FilterUnionType = FilterUnion = Annotated[
     Union[
         StringFilter,
         CategoryFilter,
         IntFilter,
         FloatFilter,
-        # BoolFilter,
+        BoolFilter,
         DateFilter,
         DateTimeFilter
     ],
@@ -783,7 +890,7 @@ FILTER_DTYPE_MAP = {
     'category': CategoryFilter,
     'int': IntFilter,
     'float': FloatFilter,
-    # 'bool': BoolFilter,
+    'bool': BoolFilter,
     'date': DateFilter,
     'datetime': DateTimeFilter
 }
@@ -1037,6 +1144,7 @@ class BinningFunctionDashIds(TypedDict):
     # PEP 728, which allows for declaring "open" TypedDicts that can still accept abritrary extra keys of a particular type.
     # the below keys all can be removed if ever migrate to a Python with PEP 728 support.
     n_bins: NotRequired[str]
+    n_freq: NotRequired[str]
 
 
 class BinningFunction(BaseModel, ABC):
@@ -1047,6 +1155,10 @@ class BinningFunction(BaseModel, ABC):
 
     @abstractmethod
     def bin(self, ser: pd.Series) -> pd.Series: ...
+
+    @property
+    def n_histogram_bins(self) -> int:
+        return 50
 
     def mutate(self, callback_input:Dict[str, Any]) -> None:
         """Mutate internal state based on a callback input dict."""
@@ -1141,7 +1253,11 @@ class NBinsBinningFunction(BinningFunction):
     n_bins: int = 10
 
     def bin(self, ser: pd.Series) -> pd.Series:
-        return pd.cut(ser, bins=self.n_bins)
+        return pd.cut(ser, bins=self.n_bins, duplicates='drop')
+
+    @property
+    def n_histogram_bins(self) -> int:
+        return self.n_bins
 
     def mutate(self, callback_input:Dict[str, Any]) -> None:
         ids = self.get_dash_ids_static(self.prefix, NBINS_KIND, self.axis)
@@ -1178,13 +1294,103 @@ class NBinsBinningFunction(BinningFunction):
         )
 
 
+NFREQ_KIND: BinKind = 'n-freq'
+class NFreqBinningFunction(BinningFunction):
+    kind: Literal['n-freq'] = NFREQ_KIND
+    label: ClassVar[str] = 'Equal Frequency (Quantile)'
+    n_freq: int = 10
+
+    def bin(self, ser: pd.Series) -> pd.Series:
+        return pd.qcut(ser, q=self.n_freq, duplicates='drop')
+
+    @property
+    def n_histogram_bins(self) -> int:
+        return self.n_freq
+
+    def mutate(self, callback_input:Dict[str, Any]) -> None:
+        ids = self.get_dash_ids_static(self.prefix, NFREQ_KIND, self.axis)
+        if callback_input['id'] == ids.get('n_freq'):
+            self.n_freq = callback_input['value']
+
+    @classmethod
+    def get_dash_ids_static(cls, prefix: str, kind: Any, axis: Literal['x','y']) -> BinningFunctionDashIds:
+        return BinningFunctionDashIds(
+            display_container=f"{prefix}-binning-{kind}-{axis}-display",
+            n_freq=f"{prefix}-binning-{kind}-{axis}-n-freq",
+        )
+
+    @classmethod
+    def layout(cls, prefix: str, axis: Literal['x','y']) -> dash_devbase.Component:
+        ids = cls.get_dash_ids_static(prefix, NFREQ_KIND, axis)
+        return dmc.Group(
+            wrap='nowrap',
+            id=ids['display_container'],
+            children=[
+                DashIconify(icon="carbon:distribution-uniform", width=16, height=16, style={'color': 'var(--mantine-color-dimmed)', 'marginLeft': '4px'}),
+                dmc.NumberInput(
+                    id=ids.get('n_freq'),
+                    value=10,
+                    min=2,
+                    step=1,
+                    size='xs',
+                    w='100%',
+                    hideControls=True,
+                    stepHoldDelay=500,
+                    stepHoldInterval=100,
+                )
+            ]
+        )
+
+
+QUART_KIND: BinKind = 'quart'
+class QuartileBinningFunction(BinningFunction):
+    kind: Literal['quart'] = QUART_KIND
+    label: ClassVar[str] = 'Quartiles (4 bins)'
+
+    def bin(self, ser: pd.Series) -> pd.Series:
+        return pd.qcut(ser, q=4, duplicates='drop')
+
+    @property
+    def n_histogram_bins(self) -> int:
+        return 4
+
+    @classmethod
+    def layout(cls, prefix: str, axis: Literal['x','y']) -> dash_devbase.Component:
+        ids = cls.get_dash_ids_static(prefix, QUART_KIND, axis)
+        return dmc.Group(
+            id=ids['display_container'],
+            children=[dmc.Text("Splits into 4 equal-frequency bins (Q1–Q4).", size='xs', c='dimmed')]
+        )
+
+
+DEC_KIND: BinKind = 'dec'
+class DecileBinningFunction(BinningFunction):
+    kind: Literal['dec'] = DEC_KIND
+    label: ClassVar[str] = 'Deciles (10 bins)'
+
+    def bin(self, ser: pd.Series) -> pd.Series:
+        return pd.qcut(ser, q=10, duplicates='drop')
+
+    @property
+    def n_histogram_bins(self) -> int:
+        return 10
+
+    @classmethod
+    def layout(cls, prefix: str, axis: Literal['x','y']) -> dash_devbase.Component:
+        ids = cls.get_dash_ids_static(prefix, DEC_KIND, axis)
+        return dmc.Group(
+            id=ids['display_container'],
+            children=[dmc.Text("Splits into 10 equal-frequency bins (deciles).", size='xs', c='dimmed')]
+        )
+
+
 BinningUnionType = Annotated[
     Union[
         NoOpBinningFunction,
         NBinsBinningFunction,
-        # NFreqBinningFunction,
-        # QuartileBinningFunction,
-        # DecileBinningFunction,
+        NFreqBinningFunction,
+        QuartileBinningFunction,
+        DecileBinningFunction,
     ],
     Field(discriminator='kind'),
 ]
@@ -1193,6 +1399,9 @@ BinningUnionType = Annotated[
 BINFUNC_REGISTRY: Dict[BinKind, Type[BinningFunction]] = {
     'none': NoOpBinningFunction,
     'n-bins': NBinsBinningFunction,
+    'n-freq': NFreqBinningFunction,
+    'quart': QuartileBinningFunction,
+    'dec': DecileBinningFunction,
 }
 
 def make_tab_close_button(tab_id:Dict[str, Any]):
@@ -1706,7 +1915,9 @@ class Distro:
             id=dict(type=self._p('tab-content'), index=self._tab_values.index('tab-stats')),
             children=[
                 make_tab_close_button(dict(type=self._p('close-tab'), index='tab-stats')),
-                dmc.Text("Statistics")
+                dmc.Box(id=self._p('stats-content'), p=4, children=[
+                    dmc.Text("Statistics will appear here after a datasource is selected.", size='xs', c='dimmed')
+                ])
             ]
         )
 
@@ -1714,11 +1925,91 @@ class Distro:
     def _tab_content_table(self, schema:DatasourceSchema): #pylint: disable=unused-argument
         return dmc.Box(
             id=dict(type=self._p('tab-content'), index=self._tab_values.index('tab-table')),
+            h='100%',
             children=[
                 make_tab_close_button(dict(type=self._p('close-tab'), index='tab-table')),
-                dmc.Text("Table")
+                dmc.Box(id=self._p('table-content'), h='100%')
             ]
         )
+
+
+    def _update_stats(self, plot_settings_data, schema_data):
+        try:
+            if not schema_data or not plot_settings_data:
+                return dmc.Text("No datasource selected.", size='xs', c='dimmed')
+            schema = DatasourceSchema(**schema_data)
+            plot_settings = PlotSettings(**plot_settings_data)
+            if not schema.has_data:
+                return dmc.Text("No datasource selected.", size='xs', c='dimmed')
+
+            if self._datasource_getter:
+                _, df = self._datasource_getter()
+            else:
+                connection = base.map_tables_to_connections[schema.name]
+                df = cast(pd.DataFrame, connection.get_dataframe(table_name=schema.name, skip_logging=True))
+
+            boolmasks = [f.mask(df) for f in plot_settings.filters]
+            df = df[functools.reduce(lambda l,r: (l & r), boolmasks, pd.Series(True, index=df.index))]
+
+            desc = df.describe(include='all').T.reset_index()
+            desc.rename(columns={'index': 'column'}, inplace=True)
+            for col in desc.columns:
+                desc[col] = desc[col].apply(
+                    lambda x: '-' if (x is None or (isinstance(x, float) and np.isnan(x)))
+                    else (f'{x:.4g}' if isinstance(x, (float, np.floating)) else str(x))
+                )
+
+            head = desc.columns.tolist()
+            body = desc.values.tolist()
+            return dmc.ScrollArea(
+                dmc.Table(
+                    data={'head': head, 'body': body},
+                    striped=True,
+                    highlightOnHover=True,
+                    withTableBorder=True,
+                    withColumnBorders=True,
+                    fz='xs',
+                ),
+                type='auto',
+            )
+        except Exception as e: #pylint: disable=broad-except
+            return dmc.Text(f"Error computing statistics: {e}", size='xs', c='red')
+
+
+    def _update_table(self, plot_settings_data, schema_data):
+        try:
+            if not schema_data or not plot_settings_data:
+                return None
+            schema = DatasourceSchema(**schema_data)
+            plot_settings = PlotSettings(**plot_settings_data)
+            if not schema.has_data:
+                return None
+
+            if self._datasource_getter:
+                _, df = self._datasource_getter()
+            else:
+                connection = base.map_tables_to_connections[schema.name]
+                df = cast(pd.DataFrame, connection.get_dataframe(table_name=schema.name, skip_logging=True))
+
+            boolmasks = [f.mask(df) for f in plot_settings.filters]
+            df = df[functools.reduce(lambda l,r: (l & r), boolmasks, pd.Series(True, index=df.index))]
+
+            # coerce non-JSON-serialisable dtypes to string
+            df_display = df.copy()
+            for col in df_display.columns:
+                if pd.api.types.is_datetime64_any_dtype(df_display[col]) or isinstance(df_display[col].dtype, pd.CategoricalDtype):
+                    df_display[col] = df_display[col].astype(str)
+
+            col_defs = [{'field': c, 'filter': True, 'sortable': True} for c in df_display.columns]
+            return dag.AgGrid(
+                rowData=df_display.to_dict('records'),
+                columnDefs=col_defs,
+                defaultColDef={'resizable': True, 'flex': 1, 'minWidth': 80},
+                dashGridOptions={'pagination': True, 'paginationAutoPageSize': True},
+                style={'height': '100%', 'minHeight': '400px'},
+            )
+        except Exception as e: #pylint: disable=broad-except
+            return dmc.Text(f"Error loading table: {e}", size='xs', c='red')
 
 
     # CALLBACK, triggered by page load or by modification of the DatasourceSchema
@@ -1929,6 +2220,8 @@ class Distro:
                 index=filter_control['add_filter'], #n-clicks
                 **schema.get_column(field).etc #type: ignore
             ))
+        elif trig_id == self._p('clear-filters'):
+            plot_settings.filters.clear()
         # individual filter controls
         elif not isinstance(trig_id, str):
             trig_id = cast(Mapping[str, Any], trig_id)
@@ -1972,6 +2265,8 @@ class Distro:
             plot_settings.overlay_globally_enabled = overlay_control['overlay_globally']
         elif trig_id == self._p('overlay-per-colorgroup'):
             plot_settings.overlay_per_colorgroup_enabled = overlay_control['overlay_per_colorgroup']
+        elif trig_id == self._p('clear-overlays'):
+            plot_settings.overlays.clear()
         elif not isinstance(trig_id, str):
             trig_id = cast(Mapping[str, Any], trig_id)
             if trig_id.get('type') == 'overlay':
@@ -2047,6 +2342,19 @@ class Distro:
             boolmasks = [f.mask(df) for f in plot_settings.filters]
             df = df[functools.reduce(lambda l,r: (l & r), boolmasks, pd.Series(True, index=df.index))]
 
+            active_x_binfunc = plot_settings.x_binfuncs[plot_settings.x_selected_binfunc]
+            active_y_binfunc = plot_settings.y_binfuncs[plot_settings.y_selected_binfunc]
+            full_x_raw = df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=df.index)
+            full_y_raw = df[plot_settings.y_column] if plot_settings.y_column else pd.Series(dtype='float', index=df.index)
+            binned_x = active_x_binfunc.bin(full_x_raw)
+            binned_y = active_y_binfunc.bin(full_y_raw)
+            def _to_midpoints(ser: pd.Series) -> pd.Series:
+                if isinstance(ser.dtype, pd.CategoricalDtype):
+                    return ser.apply(lambda v: v.mid if hasattr(v, 'mid') else v).astype(float)
+                return ser
+            binned_x_plot = _to_midpoints(binned_x)
+            binned_y_plot = _to_midpoints(binned_y)
+
             fig = make_subplots(
                 rows=2, row_heights=[0.1, 0.9],
                 cols=2, column_widths=[0.9, 0.1],
@@ -2060,8 +2368,8 @@ class Distro:
 
             for i, category in enumerate(ser_color_group.cat.categories):
                 group_df = df[ser_color_group == category]
-                group_x = group_df[plot_settings.x_column] if plot_settings.x_column else pd.Series(dtype='float', index=group_df.index)
-                group_y = group_df[plot_settings.y_column] if plot_settings.y_column else pd.Series(dtype='float', index=group_df.index)
+                group_x = binned_x_plot[group_df.index] if plot_settings.x_column else pd.Series(dtype='float', index=group_df.index)
+                group_y = binned_y_plot[group_df.index] if plot_settings.y_column else pd.Series(dtype='float', index=group_df.index)
                 group_z = group_df[plot_settings.z_column] if plot_settings.z_column else pd.Series(dtype='float', index=group_df.index)
                 group_color_value = group_df[color_column] if color_column else pd.Series(dtype='float', index=group_df.index)
 
@@ -2099,7 +2407,7 @@ class Distro:
                     )
                     fig.add_trace(
                         go.Histogram(
-                            x=group_x, nbinsx=50, bingroup=1,
+                            x=group_x, nbinsx=active_x_binfunc.n_histogram_bins, bingroup=1,
                             name=str(category), legendgroup=str(category),
                             marker=dict(
                                 opacity=0.5,
@@ -2111,7 +2419,7 @@ class Distro:
                     )
                     fig.add_trace(
                         go.Histogram(
-                            y=group_y, nbinsy=50, bingroup=2,
+                            y=group_y, nbinsy=active_y_binfunc.n_histogram_bins, bingroup=2,
                             name=str(category), legendgroup=str(category),
                             marker=dict(
                                 opacity=0.5,
@@ -2231,14 +2539,12 @@ class Distro:
             return fig
         
         except Exception as e: #pylint: disable=broad-except
-            #print(f"Exception in _update_graph: {e.__class__.__name__}: {e}")
             traceback_text = traceback.format_exc().replace('\n', '<br>')
             print(f"An error has occurred.\n\n{e.__class__.__name__}: {e}\n\n{traceback.format_exc()}")
             if isinstance(e, ValidationError):
                 print(f"  -> {plot_settings=}")
             err_text = "An error has occurred.<br><br>" + str(e.__class__.__name__) + ': ' + str(e).replace('\n', '<br>')
             err_text += '<br><br>' + traceback_text
-            raise e
             err_fig = error_figure(use_dark_mode, err_text)
             return err_fig
 
@@ -2378,10 +2684,12 @@ class Distro:
                     'x_selected': Input(self._p('x-binning-select'), 'value'),
                     'x_binner_params': {
                         'n_bins': Input(BINFUNC_REGISTRY['n-bins'].get_dash_ids_static(self._p(''), 'n-bins', 'x')['n_bins'], 'value'), #type: ignore
+                        'n_freq': Input(BINFUNC_REGISTRY['n-freq'].get_dash_ids_static(self._p(''), 'n-freq', 'x')['n_freq'], 'value'), #type: ignore
                     },
                     'y_selected': Input(self._p('y-binning-select'), 'value'),
                     'y_binner_params': {
                         'n_bins': Input(BINFUNC_REGISTRY['n-bins'].get_dash_ids_static(self._p(''), 'n-bins', 'y')['n_bins'], 'value'), #type: ignore
+                        'n_freq': Input(BINFUNC_REGISTRY['n-freq'].get_dash_ids_static(self._p(''), 'n-freq', 'y')['n_freq'], 'value'), #type: ignore
                     },
                 },
                 'colorization': dict(
@@ -2439,6 +2747,24 @@ class Distro:
             #cache_args_to_ignore=[0, 1, 2]  # ignore plot-settings and datasource-schema
             #cache_by=[] # disable cache
         )(self._update_graph)
+
+        dash.callback(
+            Output(self._p('stats-content'), 'children', allow_duplicate=True),
+            Input(self._p('plot-settings'), 'data'),
+            State(self._p('datasource-schema'), 'data'),
+            prevent_initial_call=True,
+            background=True,
+            manager=tasks.manager,
+        )(self._update_stats)
+
+        dash.callback(
+            Output(self._p('table-content'), 'children', allow_duplicate=True),
+            Input(self._p('plot-settings'), 'data'),
+            State(self._p('datasource-schema'), 'data'),
+            prevent_initial_call=True,
+            background=True,
+            manager=tasks.manager,
+        )(self._update_table)
 
 
 def demo_iris_getter() -> Tuple[str, pd.DataFrame]:

@@ -210,11 +210,11 @@ def get_navbar():
     prevent_initial_call=True,
 )
 def toggle_navbar_visible(mobile_burger, desktop_burger, navbar):
-    print(f"toggle_navbar_visible({mobile_burger=}, {desktop_burger=})")
-    navbar["collapsed"] = {
-        "mobile": not navbar['collapsed']['mobile'],
-        "desktop": not navbar['collapsed']['desktop'],
-    }
+    triggered_id = dash.callback_context.triggered_id
+    if triggered_id == 'mobile-burger':
+        navbar["collapsed"]["mobile"] = not navbar['collapsed']['mobile']
+    else:
+        navbar["collapsed"]["desktop"] = not navbar['collapsed']['desktop']
     return (
         navbar,
         BURGER_CLOSED if navbar["collapsed"]["mobile"] else BURGER_OPEN,
