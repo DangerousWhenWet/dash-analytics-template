@@ -1,7 +1,0 @@
-{
-    table_name: pg_foobar
-    cluster: localhost
-    cluster_friendly_name: DevBox
-    database: foobar
-    sql: "SELECT * FROM my_table;"
-}
