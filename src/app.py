@@ -92,8 +92,8 @@ app.layout = dmc.MantineProvider(
 
                                     DashIconify(
                                         icon='arcticons:testy',
-                                        width='30',
-                                        height='30',
+                                        width=30,
+                                        height=30,
                                     ),
 
                                     dmc.Title('Demo App', c='dark', my=0, lh=1.0),
